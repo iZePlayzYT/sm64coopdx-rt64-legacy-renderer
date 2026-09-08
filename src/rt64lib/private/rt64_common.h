@@ -16,6 +16,7 @@
 
 #include <dxgi1_4.h>
 #include <dxgi1_5.h>
+#include <dxgi1_6.h>
 #include <d3d12.h>
 
 #include "D3D12MemoryAllocator/D3D12MemAlloc.h"
@@ -382,7 +383,7 @@ namespace RT64 {
     } while( 0 )
 
 #define RT64_CATCH_EXCEPTION()							\
-	catch (const std::runtime_error &e) {				\
+	catch (const std::exception &e) {				\
 		RT64::GlobalLastError = std::string(e.what());	\
 		fprintf(stderr, "%s\n", e.what());				\
 	}

@@ -99,6 +99,7 @@ namespace RT64 {
 		ID3D12RootSignature *im3dRootSignature;
 		ID3D12StateObject *d3dRtStateObject;
 		ID3D12StateObjectProperties *d3dRtStateObjectProps;
+		ID3D12RootSignature *d3dRtGlobalRootSignature;
 
 		IDxcBlob *d3dUberSurfaceHitLibrary;
 		IDxcBlob *d3dUberShadowHitLibrary;
@@ -147,6 +148,7 @@ namespace RT64 {
 		void createRaytracingPipeline();
 		void fallBackFromCustomShaders();
 		void createDxcCompiler();
+		ID3D12RootSignature *createEmptyGlobalRootSignature();
 		ID3D12RootSignature *createRayGenSignature();
 		ID3D12RootSignature *createUberHitSignature(bool hitBuffers);
 		ID3D12RootSignature *createCustomHitSignature(bool hitBuffers);
@@ -172,6 +174,7 @@ namespace RT64 {
 		ID3D12GraphicsCommandList4 *getD3D12CommandList() const;
 		ID3D12StateObject *getD3D12RtStateObject() const;
 		ID3D12StateObjectProperties *getD3D12RtStateObjectProperties() const;
+		ID3D12RootSignature *getD3D12RtGlobalRootSignature() const;
 		ID3D12Resource *getD3D12RenderTarget() const;
 		CD3DX12_CPU_DESCRIPTOR_HANDLE getD3D12RTV() const;
 		ID3D12RootSignature *getComposeRootSignature() const;

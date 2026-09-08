@@ -7,12 +7,29 @@
 #include "rt64_nrd.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <vector>
 
 #include "NRD.h"
 
 #include "rt64_common.h"
 #include "rt64_device.h"
+
+#include <windows.h>
+
+static HRESULT CreateComputePipelineStateSEH(ID3D12Device *device, const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, ID3D12PipelineState **outPso) {
+	if (outPso == nullptr) {
+		return E_POINTER;
+	}
+
+	*outPso = nullptr;
+	__try {
+		return device->CreateComputePipelineState(desc, IID_PPV_ARGS(outPso));
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return E_FAIL;
+	}
+}
 
 static const float kWorldUnitsPerMeter = 100.0f;
 static const float kDenoisingRange = 2.0e5f;
@@ -196,7 +213,10 @@ private:
 			psoDesc.CS.BytecodeLength = pipelineDesc.computeShaderDXIL.size;
 
 			ID3D12PipelineState *pso = nullptr;
-			D3D12_CHECK(device->getD3D12Device()->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&pso)));
+			HRESULT psoResult = CreateComputePipelineStateSEH(device->getD3D12Device(), &psoDesc, &pso);
+			if (FAILED(psoResult)) {
+				throw std::runtime_error("NRD CreateComputePipelineState failed. The denoiser is unavailable on this GPU/driver.");
+			}
 			pipelines.push_back(pso);
 		}
 	}
@@ -282,6 +302,8 @@ public:
 		this->renderWidth = renderWidth;
 		this->renderHeight = renderHeight;
 
+		try {
+
 		blurRadiusScale = ((outputWidth > 0) && (renderWidth < outputWidth)) ? ((float)(renderWidth) / (float)(outputWidth)) : 1.0f;
 
 		nrd::DenoiserDesc denoiserDescs[] = {
@@ -327,6 +349,15 @@ public:
 
 		hitDistanceParameters = {};
 		hitDistanceParameters.A *= kWorldUnitsPerMeter;
+		}
+		catch (const std::exception &e) {
+			RT64_LOG_PRINTF("NRD initialization failed: %s", e.what());
+			releaseResources();
+		}
+		catch (...) {
+			RT64_LOG_PRINTF("NRD initialization failed with an unknown error");
+			releaseResources();
+		}
 	}
 
 	void updateSettings(const DenoiseParameters &p) {

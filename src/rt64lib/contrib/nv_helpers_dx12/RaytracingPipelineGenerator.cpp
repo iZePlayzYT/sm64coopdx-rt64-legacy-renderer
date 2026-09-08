@@ -44,6 +44,23 @@ compiling in debug mode.
 #include "dxcapi.h"
 #include <unordered_set>
 #include <stdexcept>
+#include <windows.h>
+
+// Isolated from C++ unwind so MSVC can use SEH around the driver call.
+// AMD's DXIL compiler (amdxc64.dll) has historically crashed here on some drivers.
+static HRESULT CreateStateObjectSEH(ID3D12Device8 *device, const D3D12_STATE_OBJECT_DESC *desc, ID3D12StateObject **outObject) {
+  if (outObject == nullptr) {
+    return E_POINTER;
+  }
+
+  *outObject = nullptr;
+  __try {
+    return device->CreateStateObject(desc, IID_PPV_ARGS(outObject));
+  }
+  __except (EXCEPTION_EXECUTE_HANDLER) {
+    return HRESULT_FROM_WIN32(GetExceptionCode());
+  }
+}
 
 namespace nv_helpers_dx12
 {
@@ -54,9 +71,16 @@ namespace nv_helpers_dx12
 RayTracingPipelineGenerator::RayTracingPipelineGenerator(ID3D12Device8* device)
     : m_device(device)
 {
-  // The pipeline creation requires having at least one empty global and local root signatures, so
-  // we systematically create both, as this does not incur any overhead
-  CreateDummyRootSignatures();
+}
+
+void RayTracingPipelineGenerator::SetGlobalRootSignature(ID3D12RootSignature* rootSignature)
+{
+  m_dummyGlobalRootSignature = rootSignature;
+}
+
+ID3D12RootSignature* RayTracingPipelineGenerator::GetGlobalRootSignature() const
+{
+  return m_dummyGlobalRootSignature;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -137,6 +161,8 @@ void RayTracingPipelineGenerator::SetMaxRecursionDepth(UINT maxDepth)
 // Compiles the raytracing state object
 ID3D12StateObject* RayTracingPipelineGenerator::Generate()
 {
+  CreateDummyRootSignatures();
+
   // The pipeline is made of a set of sub-objects, representing the DXIL libraries, hit group
   // declarations, root signature associations, plus some configuration objects
   UINT64 subobjectCount =
@@ -272,11 +298,12 @@ ID3D12StateObject* RayTracingPipelineGenerator::Generate()
 
   ID3D12StateObject* rtStateObject = nullptr;
 
-  // Create the state object
-  HRESULT hr = m_device->CreateStateObject(&pipelineDesc, IID_PPV_ARGS(&rtStateObject));
+  // Create the state object. Wrap the driver call so an AMD compiler crash becomes a
+  // recoverable error instead of taking down the process.
+  HRESULT hr = CreateStateObjectSEH(m_device, &pipelineDesc, &rtStateObject);
   if (FAILED(hr))
   {
-    throw std::logic_error("Could not create the raytracing state object");
+    throw std::runtime_error("Could not create the raytracing state object. This is often an AMD driver crash while compiling DXIL; try Adrenalin 24.4.1 through 24.8.1, or a current driver.");
   }
 
   return rtStateObject;
@@ -288,11 +315,9 @@ ID3D12StateObject* RayTracingPipelineGenerator::Generate()
 // we systematically create both
 void RayTracingPipelineGenerator::CreateDummyRootSignatures()
 {
-  // Creation of the global root signature
   D3D12_ROOT_SIGNATURE_DESC rootDesc = {};
   rootDesc.NumParameters = 0;
   rootDesc.pParameters = nullptr;
-  // A global root signature is the default, hence this flag
   rootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
   HRESULT hr = 0;
@@ -300,21 +325,26 @@ void RayTracingPipelineGenerator::CreateDummyRootSignatures()
   ID3DBlob* serializedRootSignature;
   ID3DBlob* error;
 
-  // Create the empty global root signature
-  hr = D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-                                   &serializedRootSignature, &error);
-  if (FAILED(hr))
-  {
-    throw std::logic_error("Could not serialize the global root signature");
-  }
-  hr = m_device->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(),
-                                     serializedRootSignature->GetBufferSize(),
-                                     IID_PPV_ARGS(&m_dummyGlobalRootSignature));
+  if (m_dummyGlobalRootSignature == nullptr) {
+    hr = D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                     &serializedRootSignature, &error);
+    if (FAILED(hr))
+    {
+      throw std::logic_error("Could not serialize the global root signature");
+    }
+    hr = m_device->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(),
+                                       serializedRootSignature->GetBufferSize(),
+                                       IID_PPV_ARGS(&m_dummyGlobalRootSignature));
 
-  serializedRootSignature->Release();
-  if (FAILED(hr))
-  {
-    throw std::logic_error("Could not create the global root signature");
+    serializedRootSignature->Release();
+    if (FAILED(hr))
+    {
+      throw std::logic_error("Could not create the global root signature");
+    }
+  }
+
+  if (m_dummyLocalRootSignature != nullptr) {
+    return;
   }
 
   // Create the local root signature, reusing the same descriptor but altering the creation flag

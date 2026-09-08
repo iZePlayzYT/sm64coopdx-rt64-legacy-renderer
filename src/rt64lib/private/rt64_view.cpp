@@ -2035,7 +2035,10 @@ void RT64::View::render(float deltaTimeMs) {
 		d3dCommandList->ResourceBarrier(_countof(preDispatchBarriers), preDispatchBarriers);
 
 		// Bind pipeline and dispatch primary rays.
+		// AMD / vkd3d-proton do not implicitly bind the RTPSO global root signature.
+		// NVIDIA drivers do, which is why this used to look NVIDIA-only.
 		RT64_LOG_PRINTF("Dispatching primary rays");
+		d3dCommandList->SetComputeRootSignature(scene->getDevice()->getD3D12RtGlobalRootSignature());
 		d3dCommandList->SetPipelineState1(scene->getDevice()->getD3D12RtStateObject());
 		d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data());
 		d3dCommandList->DispatchRays(&desc);

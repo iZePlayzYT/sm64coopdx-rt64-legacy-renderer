@@ -122,6 +122,12 @@ public:
   /// Compiles the raytracing state object
   ID3D12StateObject* Generate();
 
+  /// Optional: bind the same empty global root signature that DispatchRays will use.
+  /// AMD and vkd3d-proton require SetComputeRootSignature with a signature compatible
+  /// with the RTPSO global root signature. Using one shared object avoids driver mismatches.
+  void SetGlobalRootSignature(ID3D12RootSignature* rootSignature);
+  ID3D12RootSignature* GetGlobalRootSignature() const;
+
 private:
   /// Storage for DXIL libraries and their exported symbols
   struct Library
@@ -188,8 +194,8 @@ private:
   UINT m_maxRecursionDepth = 1;
 
   ID3D12Device8* m_device;
-  ID3D12RootSignature* m_dummyLocalRootSignature;
-  ID3D12RootSignature* m_dummyGlobalRootSignature;
+  ID3D12RootSignature* m_dummyLocalRootSignature = nullptr;
+  ID3D12RootSignature* m_dummyGlobalRootSignature = nullptr;
 
   
 };

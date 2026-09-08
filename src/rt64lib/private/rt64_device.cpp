@@ -64,6 +64,7 @@ RT64::Device::Device(HWND hwnd) {
 	this->hwnd = hwnd;
 	d3dAllocator = nullptr;
 	d3dRtStateObject = nullptr;
+	d3dRtGlobalRootSignature = nullptr;
 	lastCommandQueueBarrierActive = false;
 	lastCopyQueueBarrierActive = false;
 	meshBatchActive = false;
@@ -177,6 +178,7 @@ RT64::Device::~Device() {
 
 	ReleaseCom(&d3dRtStateObjectProps);
 	ReleaseCom(&d3dRtStateObject);
+	ReleaseCom(&d3dRtGlobalRootSignature);
 	ReleaseCom(&d3dRayGenSignature);
 	ReleaseCom(&d3dUberSurfaceHitLibrary);
 	ReleaseCom(&d3dUberShadowHitLibrary);
@@ -254,70 +256,86 @@ void RT64::Device::createDXGIFactory() {
 void RT64::Device::createRaytracingDevice() {
 	d3dAdapter = nullptr;
 	d3dDevice = nullptr;
+#ifndef RT64_MINIMAL
+	disableMipmaps = false;
+#endif
 
 	std::stringstream ss;
-	{
-		// Attempt to create D3D12 devices and pick the first one that actually supports raytracing.
-		// This implementation should detect more accurately cases where multiple D3D12 adapters are available
-		// but they're not raytracing capable, yet there's more devices on the system that fit the criteria.
+	auto tryAdapter = [this, &ss](IDXGIAdapter1 *adapter, UINT adapterIndex) -> bool {
 		DXGI_ADAPTER_DESC1 desc;
+		adapter->GetDesc1(&desc);
+
+		if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+			return false;
+		}
+
+		auto handleAdapterError = [this, &ss, &desc, adapterIndex](const std::string &errorSuffix) {
+			ss << "Adapter " << win32::Utf16ToUtf8(desc.Description) << " (#" << adapterIndex << "): " << errorSuffix << std::endl;
+			if (d3dDevice != nullptr) {
+				d3dDevice->Release();
+				d3dDevice = nullptr;
+			}
+		};
+
+		HRESULT deviceResult = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&d3dDevice));
+		if (FAILED(deviceResult)) {
+			handleAdapterError("No D3D12.1 feature level support.");
+			ss << "D3D12CreateDevice error code: " << std::hex << deviceResult << std::endl;
+			return false;
+		}
+
+		D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+		HRESULT checkResult = d3dDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
+		if (FAILED(checkResult)) {
+			handleAdapterError("No feature checking at the required level.");
+			ss << "D3D12Device->CheckFeatureSupport error code: " << std::hex << checkResult << std::endl;
+			return false;
+		}
+
+		if (options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_0) {
+			handleAdapterError("No raytracing support.");
+			return false;
+		}
+
+		d3dAdapter = adapter;
+		d3dAdapter->AddRef();
+
+#ifndef RT64_MINIMAL
+		// AMD mipmap generation is corrupted on this backend (https://github.com/DarioSamo/RT64/issues/54).
+		if (desc.VendorId == 0x1002) {
+			disableMipmaps = true;
+		}
+#endif
+
+		RT64_LOG_PRINTF("Selected adapter: %s", win32::Utf16ToUtf8(desc.Description).c_str());
+		return true;
+	};
+
+	IDXGIFactory6 *factory6 = nullptr;
+	if (SUCCEEDED(dxgiFactory->QueryInterface(IID_PPV_ARGS(&factory6)))) {
+		for (UINT adapterIndex = 0; factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&d3dAdapter)) != DXGI_ERROR_NOT_FOUND; ++adapterIndex) {
+			IDXGIAdapter1 *candidate = d3dAdapter;
+			d3dAdapter = nullptr;
+			const bool selected = tryAdapter(candidate, adapterIndex);
+			candidate->Release();
+			if (selected) {
+				break;
+			}
+		}
+		factory6->Release();
+	}
+	else {
 		for (UINT adapterIndex = 0; dxgiFactory->EnumAdapters1(adapterIndex, &d3dAdapter) != DXGI_ERROR_NOT_FOUND; ++adapterIndex) {
-			d3dAdapter->GetDesc1(&desc);
-
-			// Ignore software adapters.
-			if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
-				d3dAdapter->Release();
-				d3dAdapter = nullptr;
-				continue;
+			IDXGIAdapter1 *candidate = d3dAdapter;
+			d3dAdapter = nullptr;
+			const bool selected = tryAdapter(candidate, adapterIndex);
+			candidate->Release();
+			if (selected) {
+				break;
 			}
-
-			auto handleAdapterError = [this, &ss, &desc, &adapterIndex](const std::string &errorSuffix) {
-				ss << "Adapter " << win32::Utf16ToUtf8(desc.Description) << " (#" << adapterIndex << "): " << errorSuffix << std::endl;
-				if (d3dDevice != nullptr) {
-					d3dDevice->Release();
-					d3dDevice = nullptr;
-				}
-
-				if (d3dAdapter != nullptr) {
-					d3dAdapter->Release();
-					d3dAdapter = nullptr;
-				}
-			};
-
-			// Try creating the device for this adapter.
-			HRESULT deviceResult = D3D12CreateDevice(d3dAdapter, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&d3dDevice));
-			if (SUCCEEDED(deviceResult)) {
-				D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
-				HRESULT checkResult = d3dDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
-				if (SUCCEEDED(checkResult)) {
-					if (options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_0) {
-						handleAdapterError("No raytracing support.");
-					}
-					else {
-						break;
-					}
-				}
-				else {
-					handleAdapterError("No feature checking at the required level.");
-					ss << "D3D12Device->CheckFeatureSupport error code: " << std::hex << checkResult << std::endl;
-				}
-			}
-			else {
-				handleAdapterError("No D3D12.1 feature level support.");
-				ss << "D3D12CreateDevice error code: " << std::hex << deviceResult << std::endl;
-			}
-
-#		ifndef RT64_MINIMAL
-			// FIXME: Work around AMD's mipmap generation being corrupted until a solution is found.
-			// Refer to https://github.com/DarioSamo/RT64/issues/54
-			if (wcsstr(desc.Description, L"AMD") != nullptr) {
-				disableMipmaps = true;
-			}
-#		endif
 		}
 	}
 
-	// Only throw an exception if no device was detected.
 	if (d3dDevice == nullptr) {
 		throw std::runtime_error("Unable to detect a device capable of raytracing.\n" + ss.str());
 	}
@@ -427,6 +445,10 @@ ID3D12StateObject *RT64::Device::getD3D12RtStateObject() const {
 
 ID3D12StateObjectProperties *RT64::Device::getD3D12RtStateObjectProperties() const {
 	return d3dRtStateObjectProps;
+}
+
+ID3D12RootSignature *RT64::Device::getD3D12RtGlobalRootSignature() const {
+	return d3dRtGlobalRootSignature;
 }
 
 ID3D12Resource *RT64::Device::getD3D12RenderTarget() const {
@@ -1038,6 +1060,11 @@ void RT64::Device::createRaytracingPipeline() {
 
 	nv_helpers_dx12::RayTracingPipelineGenerator pipeline(d3dDevice);
 
+	if (d3dRtGlobalRootSignature == nullptr) {
+		d3dRtGlobalRootSignature = createEmptyGlobalRootSignature();
+	}
+	pipeline.SetGlobalRootSignature(d3dRtGlobalRootSignature);
+
 	RT64_LOG_PRINTF("Loading shader libraries");
 
 	// Shader libraries.
@@ -1207,6 +1234,28 @@ void RT64::Device::createDxcCompiler() {
 	D3D12_CHECK(DxcCreateInstance(CLSID_DxcCompiler, __uuidof(IDxcCompiler), (void **)&d3dDxcCompiler));
 	D3D12_CHECK(DxcCreateInstance(CLSID_DxcLibrary, __uuidof(IDxcLibrary), (void **)&d3dDxcLibrary));
 	RT64_LOG_PRINTF("Compiler creation finished");
+}
+
+ID3D12RootSignature *RT64::Device::createEmptyGlobalRootSignature() {
+	D3D12_ROOT_SIGNATURE_DESC rootDesc = {};
+	rootDesc.NumParameters = 0;
+	rootDesc.pParameters = nullptr;
+	rootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+	ID3DBlob *serializedRootSignature = nullptr;
+	ID3DBlob *error = nullptr;
+	D3D12_CHECK(D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serializedRootSignature, &error));
+
+	ID3D12RootSignature *rootSignature = nullptr;
+	HRESULT hr = d3dDevice->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(), serializedRootSignature->GetBufferSize(), IID_PPV_ARGS(&rootSignature));
+	if (serializedRootSignature != nullptr) {
+		serializedRootSignature->Release();
+	}
+	if (error != nullptr) {
+		error->Release();
+	}
+	D3D12_CHECK(hr);
+	return rootSignature;
 }
 
 ID3D12RootSignature *RT64::Device::createRayGenSignature() {
