@@ -42,8 +42,8 @@ compiling in debug mode.
 #include "RaytracingPipelineGenerator.h"
 
 #include "dxcapi.h"
-#include <unordered_set>
 #include <stdexcept>
+#include <unordered_set>
 #include <windows.h>
 
 // Isolated from C++ unwind so MSVC can use SEH around the driver call.
@@ -163,6 +163,39 @@ ID3D12StateObject* RayTracingPipelineGenerator::Generate()
 {
   CreateDummyRootSignatures();
 
+  // NVIDIA's helper leaves miss shaders without a local root signature and still
+  // injects an unassociated empty local RS. AMD's DXIL compiler (amdxc64) often
+  // crashes in CreateStateObject in that layout. Bind leftover exports (SurfaceMiss /
+  // ShadowMiss) to the dummy local RS and only declare that RS once.
+  {
+    std::vector<std::wstring> exportedSymbols;
+    BuildShaderExportList(exportedSymbols);
+
+    std::unordered_set<std::wstring> associatedSymbols;
+    for (const RootSignatureAssociation &assoc : m_rootSignatureAssociations) {
+      associatedSymbols.insert(assoc.m_symbols.begin(), assoc.m_symbols.end());
+    }
+
+    std::vector<std::wstring> unassigned;
+    for (const std::wstring &name : exportedSymbols) {
+      if (associatedSymbols.find(name) == associatedSymbols.end()) {
+        unassigned.push_back(name);
+      }
+    }
+
+    if (!unassigned.empty() && m_dummyLocalRootSignature != nullptr) {
+      AddRootSignatureAssociation(m_dummyLocalRootSignature, unassigned);
+    }
+  }
+
+  bool dummyLocalAlreadyDeclared = false;
+  for (const RootSignatureAssociation &assoc : m_rootSignatureAssociations) {
+    if (assoc.m_rootSignature == m_dummyLocalRootSignature) {
+      dummyLocalAlreadyDeclared = true;
+      break;
+    }
+  }
+
   // The pipeline is made of a set of sub-objects, representing the DXIL libraries, hit group
   // declarations, root signature associations, plus some configuration objects
   UINT64 subobjectCount =
@@ -171,7 +204,8 @@ ID3D12StateObject* RayTracingPipelineGenerator::Generate()
       1 +                                      // Shader configuration
       1 +                                      // Shader payload
       2 * m_rootSignatureAssociations.size() + // Root signature declaration + association
-      2 +                                      // Empty global and local root signatures
+      1 +                                      // Empty global root signature
+      (dummyLocalAlreadyDeclared ? 0 : 1) +    // Empty local RS if not already associated
       1;                                       // Final pipeline subobject
 
   // Initialize a vector with the target object count. It is necessary to make the allocation before
@@ -273,12 +307,14 @@ ID3D12StateObject* RayTracingPipelineGenerator::Generate()
 
   subobjects[currentIndex++] = globalRootSig;
 
-  // The pipeline construction always requires an empty local root signature
-  D3D12_STATE_SUBOBJECT dummyLocalRootSig;
-  dummyLocalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
+  // Only emit a standalone empty local RS when no shader was associated with it above.
   ID3D12RootSignature* dlSig = m_dummyLocalRootSignature;
-  dummyLocalRootSig.pDesc = &dlSig;
-  subobjects[currentIndex++] = dummyLocalRootSig;
+  if (!dummyLocalAlreadyDeclared) {
+    D3D12_STATE_SUBOBJECT dummyLocalRootSig;
+    dummyLocalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
+    dummyLocalRootSig.pDesc = &dlSig;
+    subobjects[currentIndex++] = dummyLocalRootSig;
+  }
 
   // Add a subobject for the ray tracing pipeline configuration
   D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
@@ -303,7 +339,7 @@ ID3D12StateObject* RayTracingPipelineGenerator::Generate()
   HRESULT hr = CreateStateObjectSEH(m_device, &pipelineDesc, &rtStateObject);
   if (FAILED(hr))
   {
-    throw std::runtime_error("Could not create the raytracing state object. This is often an AMD driver crash while compiling DXIL; try Adrenalin 24.4.1 through 24.8.1, or a current driver.");
+    throw std::runtime_error("Could not create the raytracing state object");
   }
 
   return rtStateObject;
