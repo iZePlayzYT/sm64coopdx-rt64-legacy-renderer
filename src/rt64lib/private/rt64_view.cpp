@@ -2038,10 +2038,14 @@ void RT64::View::render(float deltaTimeMs) {
 		// AMD / vkd3d-proton do not implicitly bind the RTPSO global root signature.
 		// NVIDIA drivers do, which is why this used to look NVIDIA-only.
 		RT64_LOG_PRINTF("Dispatching primary rays");
-		d3dCommandList->SetComputeRootSignature(scene->getDevice()->getD3D12RtGlobalRootSignature());
+		ID3D12RootSignature *rtGlobalRootSignature = scene->getDevice()->getD3D12RtGlobalRootSignature();
+		auto dispatchRays = [&]() {
+			d3dCommandList->SetComputeRootSignature(rtGlobalRootSignature);
+			d3dCommandList->DispatchRays(&desc);
+		};
 		d3dCommandList->SetPipelineState1(scene->getDevice()->getD3D12RtStateObject());
 		d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data());
-		d3dCommandList->DispatchRays(&desc);
+		dispatchRays();
 
 		// Barriers for shading buffers before dispatching secondary rays.
 		CD3DX12_RESOURCE_BARRIER shadingBarriers[] = {
@@ -2060,12 +2064,12 @@ void RT64::View::render(float deltaTimeMs) {
 		// Dispatch rays for direct light.
 		RT64_LOG_PRINTF("Dispatching direct light rays");
 		desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize();
-		d3dCommandList->DispatchRays(&desc);
+		dispatchRays();
 
 		// Dispatch rays for indirect light.
 		RT64_LOG_PRINTF("Dispatching indirect light rays");
 		desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 2;
-		d3dCommandList->DispatchRays(&desc);
+		dispatchRays();
 
 		// Wait until indirect light is done before dispatching reflection or refraction rays.
 		// TODO: This is only required to prevent simultaneous usage of the anyhit buffers.
@@ -2076,7 +2080,7 @@ void RT64::View::render(float deltaTimeMs) {
 		if (rtAnyRefraction) {
 			RT64_LOG_PRINTF("Dispatching refraction rays");
 			desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 4;
-			d3dCommandList->DispatchRays(&desc);
+			dispatchRays();
 
 			// Wait until refraction is done before dispatching reflection rays.
 			// TODO: This is only required to prevent simultaneous usage of the anyhit buffers.
@@ -2089,7 +2093,7 @@ void RT64::View::render(float deltaTimeMs) {
 		if (volumetricLights) {
 			RT64_LOG_PRINTF("Dispatching volumetric light rays");
 			desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 5;
-			d3dCommandList->DispatchRays(&desc);
+			dispatchRays();
 		}
 
 		if (rtAnyReflection) {
@@ -2098,7 +2102,7 @@ void RT64::View::render(float deltaTimeMs) {
 				// Dispatch rays for reflection.
 				RT64_LOG_PRINTF("Dispatching reflection rays");
 				desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 3;
-				d3dCommandList->DispatchRays(&desc);
+				dispatchRays();
 				reflections--;
 
 				// Add a barrier to wait for the input UAVs to be finished if there's more passes left to be done.

@@ -282,7 +282,7 @@ ID3D12StateObject* RayTracingPipelineGenerator::Generate()
     // Add a subobject to declare the root signature
     D3D12_STATE_SUBOBJECT rootSigObject = {};
     rootSigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
-    rootSigObject.pDesc = &assoc.m_rootSignature;
+    rootSigObject.pDesc = &assoc.m_rootSignaturePointer;
 
     subobjects[currentIndex++] = rootSigObject;
 
