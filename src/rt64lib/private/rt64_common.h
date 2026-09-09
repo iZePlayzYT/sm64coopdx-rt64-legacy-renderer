@@ -371,12 +371,12 @@ namespace RT64 {
 #define D3D12_CHECK( call )                                                         \
     do                                                                              \
     {                                                                               \
-        HRESULT hr = call;                                                          \
-        if (FAILED(hr))														        \
+        HRESULT d3d12CallResult = call;                                             \
+        if (FAILED(d3d12CallResult))                                                \
         {																	        \
 			char errorMessage[512];													\
 			snprintf(errorMessage, sizeof(errorMessage), "D3D12 call " #call " "	\
-				"failed with error code %X.", hr);									\
+				"failed with error code %X.", d3d12CallResult);						\
 																					\
             throw std::runtime_error(errorMessage);                                 \
         }                                                                           \

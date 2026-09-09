@@ -1247,14 +1247,14 @@ ID3D12RootSignature *RT64::Device::createEmptyGlobalRootSignature() {
 	D3D12_CHECK(D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serializedRootSignature, &error));
 
 	ID3D12RootSignature *rootSignature = nullptr;
-	HRESULT hr = d3dDevice->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(), serializedRootSignature->GetBufferSize(), IID_PPV_ARGS(&rootSignature));
+	HRESULT createResult = d3dDevice->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(), serializedRootSignature->GetBufferSize(), IID_PPV_ARGS(&rootSignature));
 	if (serializedRootSignature != nullptr) {
 		serializedRootSignature->Release();
 	}
 	if (error != nullptr) {
 		error->Release();
 	}
-	D3D12_CHECK(hr);
+	D3D12_CHECK(createResult);
 	return rootSignature;
 }
 

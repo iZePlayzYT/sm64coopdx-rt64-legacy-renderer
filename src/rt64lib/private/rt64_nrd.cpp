@@ -7,6 +7,7 @@
 #include "rt64_nrd.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <vector>
 
@@ -351,11 +352,11 @@ public:
 		hitDistanceParameters.A *= kWorldUnitsPerMeter;
 		}
 		catch (const std::exception &e) {
-			RT64_LOG_PRINTF("NRD initialization failed: %s", e.what());
+			fprintf(stderr, "RT64: NRD initialization failed: %s\n", e.what());
 			releaseResources();
 		}
 		catch (...) {
-			RT64_LOG_PRINTF("NRD initialization failed with an unknown error");
+			fprintf(stderr, "RT64: NRD initialization failed with an unknown error\n");
 			releaseResources();
 		}
 	}
