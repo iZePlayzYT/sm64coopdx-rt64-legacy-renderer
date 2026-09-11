@@ -102,6 +102,8 @@ namespace RT64 {
 		void *surfaceMissID;
 		void *shadowMissID;
 		Texture *blueNoise;
+		Texture *dummyBlack;
+		AllocatedResource dummyStructuredBuffer;
 		ID3D12PipelineState *im3dPipelineStatePoint;
 		ID3D12PipelineState *im3dPipelineStateLine;
 		ID3D12PipelineState *im3dPipelineStateTriangle;
@@ -164,6 +166,7 @@ namespace RT64 {
 		void loadPipeline();
 		void loadAssets();
 		void loadBlueNoise();
+		void loadDummyResources();
 		void createRaytracingPipeline();
 		void fallBackFromCustomShaders();
 		void createDxcCompiler();
@@ -241,6 +244,8 @@ namespace RT64 {
 		IDxcLibrary *getDxcLibrary() const;
 		Mipmaps *getMipmaps() const;
 		Texture *getBlueNoiseTexture() const;
+		Texture *getDummyBlackTexture() const;
+		ID3D12Resource *getDummyStructuredBuffer() const;
 		CD3DX12_VIEWPORT getD3D12Viewport() const;
 		CD3DX12_RECT getD3D12ScissorRect() const;
 		AllocatedResource allocateResource(D3D12_HEAP_TYPE HeapType, _In_  const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialResourceState, _In_opt_  const D3D12_CLEAR_VALUE *pOptimizedClearValue, bool committed = false, bool shared = false);

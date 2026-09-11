@@ -36,6 +36,7 @@ dispatch rays description.
 
 #include "ShaderBindingTableGenerator.h"
 
+#include <cstring>
 #include <stdexcept>
 
 // Helper to compute aligned buffer sizes
@@ -110,6 +111,11 @@ void ShaderBindingTableGenerator::Generate(ID3D12Resource* sbtBuffer,
   {
     throw std::logic_error("Could not map the shader binding table");
   }
+
+  // Padding between the shader identifier and the next record is otherwise leftover
+  // upload-heap garbage. AMD is less forgiving of that than NVIDIA.
+  const D3D12_RESOURCE_DESC sbtDesc = sbtBuffer->GetDesc();
+  memset(pData, 0, static_cast<size_t>(sbtDesc.Width));
   // Copy the shader identifiers followed by their resource pointers or root constants: first the
   // ray generation, then the miss shaders, and finally the set of hit groups
   uint32_t offset = 0;

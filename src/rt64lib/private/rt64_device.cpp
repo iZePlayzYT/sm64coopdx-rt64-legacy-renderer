@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <cstdlib>
+#include <stdexcept>
 
 #include <dwmapi.h>
 
@@ -110,6 +112,7 @@ RT64::Device::Device(HWND hwnd) {
 	surfaceMissID = nullptr;
 	shadowMissID = nullptr;
 	blueNoise = nullptr;
+	dummyBlack = nullptr;
 	width = 0;
 	height = 0;
 	mipmaps = nullptr;
@@ -174,6 +177,10 @@ RT64::Device::~Device() {
 
 	delete blueNoise;
 	blueNoise = nullptr;
+
+	delete dummyBlack;
+	dummyBlack = nullptr;
+	dummyStructuredBuffer.Release();
 
 	for (auto &pipelinePair : d3dCustomRasterPipelines) {
 		ReleaseCom(&pipelinePair.second);
@@ -651,6 +658,14 @@ RT64::Mipmaps *RT64::Device::getMipmaps() const {
 
 RT64::Texture *RT64::Device::getBlueNoiseTexture() const {
 	return blueNoise;
+}
+
+RT64::Texture *RT64::Device::getDummyBlackTexture() const {
+	return dummyBlack;
+}
+
+ID3D12Resource *RT64::Device::getDummyStructuredBuffer() const {
+	return dummyStructuredBuffer.Get();
 }
 
 CD3DX12_VIEWPORT RT64::Device::getD3D12Viewport() const {
@@ -1171,6 +1186,10 @@ void RT64::Device::loadAssets() {
 
 	loadBlueNoise();
 
+	RT64_LOG_PRINTF("Loading dummy resources");
+
+	loadDummyResources();
+
 	RT64_LOG_PRINTF("Waiting for asset load to finish");
 
 	// Close command list and wait for it to finish.
@@ -1182,6 +1201,26 @@ void RT64::Device::loadAssets() {
 void RT64::Device::loadBlueNoise() {
 	blueNoise = new RT64::Texture(this);
 	blueNoise->setRGBA8(LDR_64_64_64_RGB1_BGRA8, sizeof(LDR_64_64_64_RGB1_BGRA8), 512, 512, 512 * 4, false);
+}
+
+void RT64::Device::loadDummyResources() {
+	// AMD samples null SRVs as colorful garbage and can TDR. NVIDIA returns black.
+	static_assert(sizeof(RT64_LIGHT) <= 512, "dummy structured buffer is too small for RT64_LIGHT");
+	static_assert(sizeof(InstanceTransforms) <= 512, "dummy structured buffer is too small for InstanceTransforms");
+	static_assert(sizeof(RT64_MATERIAL) <= 512, "dummy structured buffer is too small for RT64_MATERIAL");
+
+	static const unsigned char dummyBlackPixel[4] = { 0, 0, 0, 0 };
+	dummyBlack = new RT64::Texture(this);
+	dummyBlack->setRGBA8(dummyBlackPixel, sizeof(dummyBlackPixel), 1, 1, 4, false);
+
+	const uint64_t dummySize = 512;
+	dummyStructuredBuffer = allocateBuffer(D3D12_HEAP_TYPE_UPLOAD, dummySize, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+	if (!dummyStructuredBuffer.IsNull()) {
+		void *mapped = nullptr;
+		D3D12_CHECK(dummyStructuredBuffer.Get()->Map(0, nullptr, &mapped));
+		memset(mapped, 0, static_cast<size_t>(dummySize));
+		dummyStructuredBuffer.Get()->Unmap(0, nullptr);
+	}
 }
 
 void RT64::Device::createRaytracingPipeline() {
@@ -1871,7 +1910,14 @@ void RT64::Device::postRender(int vsyncInterval, View *activeView, bool frameGen
 
 	// Present the frame.
 	const UINT presentFlags = ((vsyncInterval == 0) && allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
-	D3D12_CHECK(d3dSwapChain->Present(vsyncInterval, presentFlags));
+	HRESULT presentHr = d3dSwapChain->Present(vsyncInterval, presentFlags);
+	if (FAILED(presentHr)) {
+		const HRESULT removed = (d3dDevice != nullptr) ? d3dDevice->GetDeviceRemovedReason() : presentHr;
+		fprintf(stderr, "RT64: Present failed hr=0x%08X deviceRemovedReason=0x%08X\n", (unsigned)presentHr, (unsigned)removed);
+		char errorMessage[512];
+		snprintf(errorMessage, sizeof(errorMessage), "D3D12 call d3dSwapChain->Present(vsyncInterval, presentFlags) failed with error code %X.", presentHr);
+		throw std::runtime_error(errorMessage);
+	}
 	waitForGPU();
 	d3dFrameIndex = d3dSwapChain->GetCurrentBackBufferIndex();
 

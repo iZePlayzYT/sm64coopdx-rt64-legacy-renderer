@@ -1083,69 +1083,86 @@ void RT64::View::writeSwapDescriptors(const std::function<D3D12_CPU_DESCRIPTOR_H
 }
 
 void RT64::View::writeDynamicDescriptors(const std::function<D3D12_CPU_DESCRIPTOR_HANDLE(HeapIndices)> &handleFor, bool forceRewrite) {
-	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	ID3D12Device8 *d3dDevice = scene->getDevice()->getD3D12Device();
+	ID3D12Resource *dummyStructured = scene->getDevice()->getDummyStructuredBuffer();
 
 	// Add the Top Level AS SRV.
 	if (!topLevelASBuffers.result.IsNull()) {
 		D3D12_GPU_VIRTUAL_ADDRESS tlasVA = topLevelASBuffers.result.Get()->GetGPUVirtualAddress();
 		if (forceRewrite || (cachedTlasVA != tlasVA)) {
+			srvDesc = {};
 			srvDesc.Format = DXGI_FORMAT_UNKNOWN;
 			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
 			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 			srvDesc.RaytracingAccelerationStructure.Location = tlasVA;
-			scene->getDevice()->getD3D12Device()->CreateShaderResourceView(nullptr, &srvDesc, handleFor(HeapIndices::SceneBVH));
+			d3dDevice->CreateShaderResourceView(nullptr, &srvDesc, handleFor(HeapIndices::SceneBVH));
 			cachedTlasVA = tlasVA;
 		}
 	}
 
-	// Describe and create a constant buffer view for the lights.
-	if (scene->getLightsCount() > 0) {
-		ID3D12Resource *lightsBuffer = scene->getLightsBuffer();
-		int lightsCount = scene->getLightsCount();
-		if (forceRewrite || (cachedLightsBuffer != lightsBuffer) || (cachedLightsCount != lightsCount)) {
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-			srvDesc.Buffer.FirstElement = 0;
-			srvDesc.Buffer.NumElements = lightsCount;
-			srvDesc.Buffer.StructureByteStride = sizeof(RT64_LIGHT);
-			srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-			scene->getDevice()->getD3D12Device()->CreateShaderResourceView(lightsBuffer, &srvDesc, handleFor(HeapIndices::SceneLights));
-			cachedLightsBuffer = lightsBuffer;
-			cachedLightsCount = lightsCount;
-		}
+	// Direct raygen always calls SceneLights.GetDimensions(). A missing descriptor
+	// returns garbage on AMD and the light loop then reads invalid memory.
+	ID3D12Resource *lightsBuffer = scene->getLightsBuffer();
+	int lightsCount = scene->getLightsCount();
+	if ((lightsBuffer == nullptr) || (lightsCount <= 0)) {
+		lightsBuffer = dummyStructured;
+		lightsCount = 1;
+	}
+	if (forceRewrite || (cachedLightsBuffer != lightsBuffer) || (cachedLightsCount != lightsCount)) {
+		srvDesc = {};
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		srvDesc.Buffer.FirstElement = 0;
+		srvDesc.Buffer.NumElements = static_cast<UINT>(lightsCount);
+		srvDesc.Buffer.StructureByteStride = sizeof(RT64_LIGHT);
+		srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+		d3dDevice->CreateShaderResourceView(lightsBuffer, &srvDesc, handleFor(HeapIndices::SceneLights));
+		cachedLightsBuffer = lightsBuffer;
+		cachedLightsCount = lightsCount;
 	}
 
 	const UINT totalInstanceCount = static_cast<UINT>(rtInstances.size() + rasterBgInstances.size() + rasterFgInstances.size());
 
-	// Describe the transforms buffer per instance.
 	{
 		ID3D12Resource *transformsBuffer = activeInstancesBufferTransforms.Get();
+		UINT transformCount = totalInstanceCount;
+		if ((transformsBuffer == nullptr) || (transformCount == 0)) {
+			transformsBuffer = dummyStructured;
+			transformCount = 1;
+		}
 		if (forceRewrite || (cachedInstanceTransformsBuffer != transformsBuffer) || (cachedInstanceCount != totalInstanceCount)) {
+			srvDesc = {};
 			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 			srvDesc.Format = DXGI_FORMAT_UNKNOWN;
 			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
 			srvDesc.Buffer.FirstElement = 0;
-			srvDesc.Buffer.NumElements = totalInstanceCount;
+			srvDesc.Buffer.NumElements = transformCount;
 			srvDesc.Buffer.StructureByteStride = sizeof(InstanceTransforms);
 			srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-			scene->getDevice()->getD3D12Device()->CreateShaderResourceView(transformsBuffer, &srvDesc, handleFor(HeapIndices::instanceTransforms));
+			d3dDevice->CreateShaderResourceView(transformsBuffer, &srvDesc, handleFor(HeapIndices::instanceTransforms));
 			cachedInstanceTransformsBuffer = transformsBuffer;
 		}
 	}
 
-	// Describe the properties buffer per instance.
 	{
 		ID3D12Resource *materialsBuffer = activeInstancesBufferMaterials.Get();
+		UINT materialCount = totalInstanceCount;
+		if ((materialsBuffer == nullptr) || (materialCount == 0)) {
+			materialsBuffer = dummyStructured;
+			materialCount = 1;
+		}
 		if (forceRewrite || (cachedInstanceMaterialsBuffer != materialsBuffer) || (cachedInstanceCount != totalInstanceCount)) {
+			srvDesc = {};
 			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 			srvDesc.Format = DXGI_FORMAT_UNKNOWN;
 			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
 			srvDesc.Buffer.FirstElement = 0;
-			srvDesc.Buffer.NumElements = totalInstanceCount;
+			srvDesc.Buffer.NumElements = materialCount;
 			srvDesc.Buffer.StructureByteStride = sizeof(RT64_MATERIAL);
 			srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-			scene->getDevice()->getD3D12Device()->CreateShaderResourceView(materialsBuffer, &srvDesc, handleFor(HeapIndices::instanceMaterials));
+			d3dDevice->CreateShaderResourceView(materialsBuffer, &srvDesc, handleFor(HeapIndices::instanceMaterials));
 			cachedInstanceMaterialsBuffer = materialsBuffer;
 		}
 	}
@@ -1230,44 +1247,55 @@ void RT64::View::createShaderResourceHeap() {
 			handle.ptr += handleIncrement;
 		}
 
-		// Fill with null SRVs if the heap was just created.
-		if (fillWithNull) {
-			for (size_t i = usedTextures.size(); i < SRV_TEXTURES_MAX; i++) {
-				scene->getDevice()->getD3D12Device()->CreateShaderResourceView(nullptr, &textureSRVDesc, handle);
-				handle.ptr += handleIncrement;
-			}
-		}
+		if (fillWithNull || (customTextureSlots > 0)) {
+			Texture *dummyBlack = scene->getDevice()->getDummyBlackTexture();
+			D3D12_SHADER_RESOURCE_VIEW_DESC dummyTextureSRVDesc = {};
+			dummyTextureSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			dummyTextureSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			dummyTextureSRVDesc.Format = (dummyBlack != nullptr) ? dummyBlack->getFormat() : DXGI_FORMAT_R8G8B8A8_UNORM;
+			dummyTextureSRVDesc.Texture2D.MostDetailedMip = 0;
+			dummyTextureSRVDesc.Texture2D.MipLevels = 1;
+			ID3D12Resource *dummyBlackResource = (dummyBlack != nullptr) ? dummyBlack->getTexture() : nullptr;
 
-		if (customTextureSlots > 0) {
-			auto writeInstanceTextures = [&](const std::vector<RenderInstance> &instances) {
-				for (const RenderInstance &inst : instances) {
-					if (inst.customTextureHeapIndex < 0) { continue; }
-
-					D3D12_CPU_DESCRIPTOR_HANDLE instanceHandle = descriptorHeap->GetCPUDescriptorHandleForHeapStart();
-					instanceHandle.ptr += (size_t)(customTextureHeapStart() + inst.customTextureHeapIndex) * handleIncrement;
-
-					Texture *const instanceTextures[RT64_CUSTOM_RASTER_MAX_TEXTURES] = {
-						(inst.instance != nullptr) ? inst.instance->getDiffuseTexture() : nullptr,
-						(inst.instance != nullptr) ? inst.instance->getDiffuse2Texture() : nullptr
-					};
-
-					for (unsigned int i = 0; i < RT64_CUSTOM_RASTER_MAX_TEXTURES; i++) {
-						if (instanceTextures[i] != nullptr) {
-							textureSRVDesc.Format = instanceTextures[i]->getFormat();
-							scene->getDevice()->getD3D12Device()->CreateShaderResourceView(instanceTextures[i]->getTexture(), &textureSRVDesc, instanceHandle);
-						}
-						else {
-							textureSRVDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-							scene->getDevice()->getD3D12Device()->CreateShaderResourceView(nullptr, &textureSRVDesc, instanceHandle);
-						}
-
-						instanceHandle.ptr += handleIncrement;
-					}
+			// Unused gTextures slots are still bound in the global 512-wide SRV table.
+			// Null SRVs become sparkles / TDR on AMD (NVIDIA returns black).
+			if (fillWithNull) {
+				for (size_t i = usedTextures.size(); i < SRV_TEXTURES_MAX; i++) {
+					scene->getDevice()->getD3D12Device()->CreateShaderResourceView(dummyBlackResource, &dummyTextureSRVDesc, handle);
+					handle.ptr += handleIncrement;
 				}
-			};
+			}
 
-			writeInstanceTextures(rasterBgInstances);
-			writeInstanceTextures(rasterFgInstances);
+			if (customTextureSlots > 0) {
+				auto writeInstanceTextures = [&](const std::vector<RenderInstance> &instances) {
+					for (const RenderInstance &inst : instances) {
+						if (inst.customTextureHeapIndex < 0) { continue; }
+
+						D3D12_CPU_DESCRIPTOR_HANDLE instanceHandle = descriptorHeap->GetCPUDescriptorHandleForHeapStart();
+						instanceHandle.ptr += (size_t)(customTextureHeapStart() + inst.customTextureHeapIndex) * handleIncrement;
+
+						Texture *const instanceTextures[RT64_CUSTOM_RASTER_MAX_TEXTURES] = {
+							(inst.instance != nullptr) ? inst.instance->getDiffuseTexture() : nullptr,
+							(inst.instance != nullptr) ? inst.instance->getDiffuse2Texture() : nullptr
+						};
+
+						for (unsigned int i = 0; i < RT64_CUSTOM_RASTER_MAX_TEXTURES; i++) {
+							if (instanceTextures[i] != nullptr) {
+								textureSRVDesc.Format = instanceTextures[i]->getFormat();
+								scene->getDevice()->getD3D12Device()->CreateShaderResourceView(instanceTextures[i]->getTexture(), &textureSRVDesc, instanceHandle);
+							}
+							else {
+								scene->getDevice()->getD3D12Device()->CreateShaderResourceView(dummyBlackResource, &dummyTextureSRVDesc, instanceHandle);
+							}
+
+							instanceHandle.ptr += handleIncrement;
+						}
+					}
+				};
+
+				writeInstanceTextures(rasterBgInstances);
+				writeInstanceTextures(rasterFgInstances);
+			}
 		}
 	}
 
@@ -2136,7 +2164,7 @@ void RT64::View::render(float deltaTimeMs) {
 	};
 
 	// Raytracing.
-	if (!rtInstances.empty()) {
+	if (!rtInstances.empty() && !topLevelASBuffers.result.IsNull() && !sbtStorage.IsNull()) {
 		RT64_LOG_PRINTF("Drawing raytraced instances");
 
 		// Ray generation.
@@ -2184,6 +2212,7 @@ void RT64::View::render(float deltaTimeMs) {
 		D3D12_GPU_DESCRIPTOR_HANDLE rtSrvUavTable = descriptorHeap->GetGPUDescriptorHandleForHeapStart();
 		D3D12_GPU_DESCRIPTOR_HANDLE rtSamplerTable = samplerHeap->GetGPUDescriptorHandleForHeapStart();
 		auto dispatchRays = [&]() {
+			d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data());
 			d3dCommandList->SetComputeRootSignature(rtGlobalRootSignature);
 			d3dCommandList->SetComputeRootDescriptorTable(0, rtSrvUavTable);
 			d3dCommandList->SetComputeRootDescriptorTable(1, rtSamplerTable);
