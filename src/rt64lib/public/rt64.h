@@ -266,6 +266,8 @@ typedef struct {
 	float upscalerSharpness;
 	bool denoiserEnabled;
 	float aspectRatio;
+	bool frameGenEnabled;
+	bool frameGenSuspended;
 } RT64_VIEW_DESC;
 
 #define RT64_MAX_SHADER_UNIFORM_BLOCKS 8
@@ -444,6 +446,7 @@ typedef void (*GetViewDescriptionPtr)(RT64_VIEW *viewPtr, RT64_VIEW_DESC *outVie
 typedef void (*SetViewSkyPlanePtr)(RT64_VIEW *viewPtr, RT64_TEXTURE *texturePtr);
 typedef RT64_INSTANCE* (*GetViewRaytracedInstanceAtPtr)(RT64_VIEW *viewPtr, int x, int y);
 typedef bool (*GetViewUpscalerSupportPtr)(RT64_VIEW *viewPtr, char upscaler);
+typedef unsigned long long (*GetViewGeneratedFrameCountPtr)(RT64_VIEW *viewPtr);
 typedef void (*DestroyViewPtr)(RT64_VIEW* viewPtr);
 typedef RT64_SCENE* (*CreateScenePtr)(RT64_DEVICE* devicePtr);
 typedef void (*SetSceneDescriptionPtr)(RT64_SCENE* scenePtr, RT64_SCENE_DESC sceneDesc);
@@ -452,8 +455,6 @@ typedef void (*DestroyScenePtr)(RT64_SCENE* scenePtr);
 typedef RT64_MESH* (*CreateMeshPtr)(RT64_DEVICE* devicePtr, int flags);
 typedef void (*SetMeshPtr)(RT64_MESH* meshPtr, void* vertexArray, int vertexCount, int vertexStride, unsigned int* indexArray, int indexCount);
 typedef void (*SetMeshVertexDataPtr)(RT64_MESH* meshPtr, void* vertexArray, int vertexCount, int vertexStride, unsigned int* indexArray, int indexCount);
-typedef void *(*BeginMeshVertexUpdatePtr)(RT64_MESH* meshPtr, int vertexCount, int vertexStride, unsigned int* indexArray, int indexCount);
-typedef void (*EndMeshVertexUpdatePtr)(RT64_MESH* meshPtr, int vertexCount, int vertexStride, int updateAccelerationStructure);
 typedef void (*DestroyMeshPtr)(RT64_MESH* meshPtr);
 typedef RT64_SHADER *(*CreateShaderPtr)(RT64_DEVICE *devicePtr, RT64_COMBINER_DESC cc, unsigned int filter, unsigned int hAddr, unsigned int vAddr, int flags);
 typedef RT64_SHADER *(*CreateShaderFromSourcePtr)(RT64_DEVICE *devicePtr, RT64_COMBINER_DESC cc, const char *customVertexHLSL, const char *customFragmentHLSL, const RT64_SHADER_INPUT *vertexInputs, unsigned int vertexInputCount, const char *fragmentOutputName, unsigned int filter, unsigned int hAddr, unsigned int vAddr, int flags);
@@ -496,6 +497,7 @@ typedef struct {
 	SetViewSkyPlanePtr SetViewSkyPlane;
 	GetViewRaytracedInstanceAtPtr GetViewRaytracedInstanceAt;
 	GetViewUpscalerSupportPtr GetViewUpscalerSupport;
+	GetViewGeneratedFrameCountPtr GetViewGeneratedFrameCount;
 	DestroyViewPtr DestroyView;
 	CreateScenePtr CreateScene;
 	SetSceneDescriptionPtr SetSceneDescription;
@@ -504,8 +506,6 @@ typedef struct {
 	CreateMeshPtr CreateMesh;
 	SetMeshPtr SetMesh;
 	SetMeshVertexDataPtr SetMeshVertexData;
-	BeginMeshVertexUpdatePtr BeginMeshVertexUpdate;
-	EndMeshVertexUpdatePtr EndMeshVertexUpdate;
 	DestroyMeshPtr DestroyMesh;
 	CreateShaderPtr CreateShader;
 	CreateShaderFromSourcePtr CreateShaderFromSource;
@@ -562,6 +562,7 @@ inline RT64_LIBRARY RT64_LoadLibrary() {
 		lib.SetViewSkyPlane = (SetViewSkyPlanePtr)(GetProcAddress(lib.handle, "RT64_SetViewSkyPlane"));
 		lib.GetViewRaytracedInstanceAt = (GetViewRaytracedInstanceAtPtr)(GetProcAddress(lib.handle, "RT64_GetViewRaytracedInstanceAt"));
 		lib.GetViewUpscalerSupport = (GetViewUpscalerSupportPtr)(GetProcAddress(lib.handle, "RT64_GetViewUpscalerSupport"));
+		lib.GetViewGeneratedFrameCount = (GetViewGeneratedFrameCountPtr)(GetProcAddress(lib.handle, "RT64_GetViewGeneratedFrameCount"));
 		lib.DestroyView = (DestroyViewPtr)(GetProcAddress(lib.handle, "RT64_DestroyView"));
 		lib.CreateScene = (CreateScenePtr)(GetProcAddress(lib.handle, "RT64_CreateScene"));
 		lib.SetSceneDescription = (SetSceneDescriptionPtr)(GetProcAddress(lib.handle, "RT64_SetSceneDescription"));
@@ -570,8 +571,6 @@ inline RT64_LIBRARY RT64_LoadLibrary() {
 		lib.CreateMesh = (CreateMeshPtr)(GetProcAddress(lib.handle, "RT64_CreateMesh"));
 		lib.SetMesh = (SetMeshPtr)(GetProcAddress(lib.handle, "RT64_SetMesh"));
 		lib.SetMeshVertexData = (SetMeshVertexDataPtr)(GetProcAddress(lib.handle, "RT64_SetMeshVertexData"));
-		lib.BeginMeshVertexUpdate = (BeginMeshVertexUpdatePtr)(GetProcAddress(lib.handle, "RT64_BeginMeshVertexUpdate"));
-		lib.EndMeshVertexUpdate = (EndMeshVertexUpdatePtr)(GetProcAddress(lib.handle, "RT64_EndMeshVertexUpdate"));
 		lib.DestroyMesh = (DestroyMeshPtr)(GetProcAddress(lib.handle, "RT64_DestroyMesh"));
 		lib.CreateShader = (CreateShaderPtr)(GetProcAddress(lib.handle, "RT64_CreateShader"));
 		lib.CreateShaderFromSource = (CreateShaderFromSourcePtr)(GetProcAddress(lib.handle, "RT64_CreateShaderFromSource"));

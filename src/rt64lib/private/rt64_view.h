@@ -7,6 +7,7 @@
 #include "rt64_common.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -18,6 +19,7 @@
 #include "rt64_fsr.h"
 #include "rt64_xess.h"
 #include "rt64_nrd.h"
+#include "rt64_framegen.h"
 
 namespace RT64 {
 	class Scene;
@@ -134,6 +136,20 @@ namespace RT64 {
 		AllocatedResource rtHitInstanceId;
 		AllocatedResource rtOutputUpscaled;
 
+		AllocatedResource rtUI;
+		ID3D12DescriptorHeap *rtUIHeap;
+		bool frameGenUIRendered;
+		AllocatedResource frameGenPostProcessUniformBuffer[2];
+		unsigned char *frameGenPostProcessUniformBufferMapped[2];
+		uint32_t frameGenPostProcessUniformBufferSize[2];
+		D3D12_GPU_VIRTUAL_ADDRESS frameGenPostProcessUniformAddresses[2][RT64_MAX_SHADER_UNIFORM_BLOCKS];
+		std::atomic<int> frameGenReadableSlot;
+		std::atomic<uint64_t> frameGenGeneratedFrameCount;
+		ID3D12DescriptorHeap *frameGenCompositeHeap;
+		ID3D12DescriptorHeap *frameGenCompositeOutputRtvHeap;
+		uint32_t frameGenCompositeTable;
+		AllocatedResource frameGenDummyGlobalParams;
+
 		bool rtSwap;
 		int rtWidth;
 		int rtHeight;
@@ -202,6 +218,7 @@ namespace RT64 {
 		uint32_t postProcessUniformBufferSize;
 		D3D12_GPU_VIRTUAL_ADDRESS postProcessUniformAddresses[RT64_MAX_SHADER_UNIFORM_BLOCKS];
 		void updatePostProcessUniforms();
+		void updateFrameGenPostProcessUniforms();
 		std::vector<RenderInstance> rasterBgInstances;
 		std::vector<RenderInstance> rasterFgInstances;
 		std::vector<RenderInstance> rtInstances;
@@ -225,8 +242,18 @@ namespace RT64 {
 		bool upscalerReactiveMask;
 		bool upscalerLockMask;
 
+		FrameGen *frameGen;
+		bool frameGenEnabled;
+		bool frameGenSuspended;
+		bool frameGenResetPending;
+		uint64_t frameGenFrameID;
+		bool frameGenFrameReset;
+		bool frameGenFramePrepared;
+
 		Denoiser *nrdDenoiser;
 
+		bool frameGenCompositeActive() const;
+		void releaseFrameGen();
 		void createOutputBuffers();
 		void releaseOutputBuffers();
 		void createInstanceTransformsBuffer();
@@ -306,5 +333,18 @@ namespace RT64 {
 		bool getUpscalerLockMask() const;
 		bool getUpscalerInitialized(UpscaleMode mode) const;
 		bool getUpscalerAccelerated(UpscaleMode mode) const;
+		void setFrameGenEnabled(bool v);
+		bool getFrameGenEnabled() const;
+		void setFrameGenSuspended(bool v);
+		bool getFrameGenSuspended() const;
+		uint64_t getFrameGenGeneratedFrameCount() const;
+		FrameGen *getFrameGen() const;
+		uint64_t getFrameGenFrameID() const;
+		bool getFrameGenFrameReset() const;
+		bool getFrameGenFramePrepared() const;
+		bool getFrameGenUIRenderTargetView(CD3DX12_CPU_DESCRIPTOR_HANDLE &outHandle) const;
+		ID3D12Resource *finishFrameGenUI();
+
+		void runFrameGenPresentComposite(const FrameGenPresentParams &params);
 	};
 };

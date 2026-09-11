@@ -26,6 +26,15 @@
 
 namespace {
 	const int MaxQueries = 16 + 1;
+
+	const D3D12_RESOURCE_STATES FrameGenUIReadState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+	const uint32_t FrameGenCompositeTableSize = 3;
+	const uint32_t FrameGenCompositeTableCount = 8;
+
+	void frameGenPresentCallbackTrampoline(const RT64::FrameGenPresentParams &params, void *userCtx) {
+		static_cast<RT64::View *>(userCtx)->runFrameGenPresentComposite(params);
+	}
 };
 
 // Private
@@ -47,6 +56,30 @@ RT64::View::View(Scene *scene) {
 	composeHeap = nullptr;
 	samplerHeap = nullptr;
 	postProcessHeap = nullptr;
+	rtUIHeap = nullptr;
+	frameGenUIRendered = false;
+	frameGenPostProcessUniformBufferMapped[0] = nullptr;
+	frameGenPostProcessUniformBufferMapped[1] = nullptr;
+	frameGenPostProcessUniformBufferSize[0] = 0;
+	frameGenPostProcessUniformBufferSize[1] = 0;
+	frameGenReadableSlot.store(-1, std::memory_order_relaxed);
+	frameGenGeneratedFrameCount.store(0, std::memory_order_relaxed);
+	frameGenCompositeHeap = nullptr;
+	frameGenCompositeOutputRtvHeap = nullptr;
+	frameGenCompositeTable = 0;
+
+	{
+		const UINT32 dummySize = 1024;
+		frameGenDummyGlobalParams = scene->getDevice()->allocateBuffer(D3D12_HEAP_TYPE_UPLOAD, dummySize, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		if (!frameGenDummyGlobalParams.IsNull()) {
+			unsigned char *mapped = nullptr;
+			CD3DX12_RANGE readRange(0, 0);
+			if (SUCCEEDED(frameGenDummyGlobalParams.Get()->Map(0, &readRange, reinterpret_cast<void **>(&mapped))) && (mapped != nullptr)) {
+				memset(mapped, 0, dummySize);
+				frameGenDummyGlobalParams.Get()->Unmap(0, nullptr);
+			}
+		}
+	}
 	volumetricFilterHeaps[0] = nullptr;
 	volumetricFilterHeaps[1] = nullptr;
 	outputBufferGeneration = 0;
@@ -122,6 +155,14 @@ RT64::View::View(Scene *scene) {
 	upscalerReactiveMask = true;
 	upscalerLockMask = true;
 
+	frameGen = new FrameGen(scene->getDevice());
+	frameGenEnabled = false;
+	frameGenSuspended = false;
+	frameGenResetPending = true;
+	frameGenFrameID = 0;
+	frameGenFrameReset = true;
+	frameGenFramePrepared = false;
+
 	nrdDenoiser = new Denoiser(scene->getDevice());
 
 	createOutputBuffers();
@@ -137,8 +178,13 @@ RT64::View::~View() {
 	delete dlss;
 	delete fsr;
 	delete xess;
+	releaseFrameGen();
+	delete frameGen;
 	delete nrdDenoiser;
 	
+	frameGenDummyGlobalParams.Release();
+	frameGenPostProcessUniformBuffer[0].Release();
+	frameGenPostProcessUniformBuffer[1].Release();
 	scene->removeView(this);
 
 	releaseOutputBuffers();
@@ -157,6 +203,8 @@ RT64::View::~View() {
 
 void RT64::View::createOutputBuffers() {
 	RT64_LOG_PRINTF("Starting output buffer creation");
+
+	releaseFrameGen();
 
 	releaseOutputBuffers();
 
@@ -197,6 +245,11 @@ void RT64::View::createOutputBuffers() {
 		rtUpscaleActive = false;
 	}
 
+	if (frameGenEnabled) {
+		frameGen->set(screenWidth, screenHeight, rtWidth, rtHeight);
+	}
+
+	frameGenResetPending = true;
 	rtSkipReprojection = true;
 
 	globalParamsBufferData.resolution.x = (float)(rtWidth);
@@ -298,6 +351,64 @@ void RT64::View::createOutputBuffers() {
 		rtOutputUpscaled = scene->getDevice()->allocateResource(D3D12_HEAP_TYPE_DEFAULT, &resDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr);
 	}
 
+	if (frameGenEnabled && !frameGenDummyGlobalParams.IsNull()) {
+		resDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+		resDesc.Width = screenWidth;
+		resDesc.Height = screenHeight;
+		D3D12_CLEAR_VALUE uiClearValue = {};
+		uiClearValue.Format = resDesc.Format;
+		rtUI = scene->getDevice()->allocateResource(D3D12_HEAP_TYPE_DEFAULT, &resDesc, FrameGenUIReadState, &uiClearValue);
+
+		D3D12_DESCRIPTOR_HEAP_DESC uiRtvHeapDesc = {};
+		uiRtvHeapDesc.NumDescriptors = 1;
+		uiRtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+		uiRtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+		D3D12_CHECK(scene->getDevice()->getD3D12Device()->CreateDescriptorHeap(&uiRtvHeapDesc, IID_PPV_ARGS(&rtUIHeap)));
+		scene->getDevice()->getD3D12Device()->CreateRenderTargetView(rtUI.Get(), nullptr, rtUIHeap->GetCPUDescriptorHandleForHeapStart());
+
+		if (frameGenCompositeHeap == nullptr) {
+			frameGenCompositeHeap = nv_helpers_dx12::CreateDescriptorHeap(scene->getDevice()->getD3D12Device(), FrameGenCompositeTableCount * FrameGenCompositeTableSize, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, true);
+		}
+
+		if (frameGenCompositeOutputRtvHeap == nullptr) {
+			D3D12_DESCRIPTOR_HEAP_DESC compositeOutputRtvHeapDesc = {};
+			compositeOutputRtvHeapDesc.NumDescriptors = 1;
+			compositeOutputRtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+			compositeOutputRtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+			D3D12_CHECK(scene->getDevice()->getD3D12Device()->CreateDescriptorHeap(&compositeOutputRtvHeapDesc, IID_PPV_ARGS(&frameGenCompositeOutputRtvHeap)));
+		}
+
+		D3D12_CPU_DESCRIPTOR_HANDLE compositeHandle = frameGenCompositeHeap->GetCPUDescriptorHandleForHeapStart();
+		const UINT compositeIncrement = scene->getDevice()->getD3D12Device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC dummySRVDesc = {};
+		dummySRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		dummySRVDesc.Texture2D.MipLevels = 1;
+		dummySRVDesc.Texture2D.MostDetailedMip = 0;
+		dummySRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		dummySRVDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+		// A real zeroed buffer, since a null CBV isn't guaranteed to read as zero.
+		D3D12_CONSTANT_BUFFER_VIEW_DESC dummyCBVDesc = {};
+		dummyCBVDesc.BufferLocation = frameGenDummyGlobalParams.Get()->GetGPUVirtualAddress();
+		dummyCBVDesc.SizeInBytes = (UINT)(frameGenDummyGlobalParams.Get()->GetDesc().Width);
+
+		for (uint32_t i = 0; i < FrameGenCompositeTableCount; i++) {
+			compositeHandle.ptr += compositeIncrement;
+			scene->getDevice()->getD3D12Device()->CreateShaderResourceView(nullptr, &dummySRVDesc, compositeHandle);
+			compositeHandle.ptr += compositeIncrement;
+			scene->getDevice()->getD3D12Device()->CreateConstantBufferView(&dummyCBVDesc, compositeHandle);
+			compositeHandle.ptr += compositeIncrement;
+		}
+
+		frameGenCompositeTable = 0;
+
+		frameGen->setPresentCallback(frameGenPresentCallbackTrampoline, this);
+	}
+	else {
+		frameGen->setPresentCallback(nullptr, nullptr);
+	}
+
 	// Create hit result buffers.
 	UINT64 hitCountBufferSizeOne = rtWidth * rtHeight;
 	UINT64 hitCountBufferSizeAll = hitCountBufferSizeOne * MaxQueries;
@@ -346,6 +457,7 @@ void RT64::View::createOutputBuffers() {
 	rtHitSpecular.SetName(L"rtHitSpecular");
 	rtHitInstanceId.SetName(L"rtHitInstanceId");
 	rtOutputUpscaled.SetName(L"rtOutputUpscaled");
+	rtUI.SetName(L"rtUI");
 #endif
 
 	// Create the RTVs.
@@ -408,10 +520,14 @@ void RT64::View::releaseOutputBuffers() {
 	rtHitSpecular.Release();
 	rtHitInstanceId.Release();
 	rtOutputUpscaled.Release();
+	rtUI.Release();
 
 	ReleaseCom(&rasterBgHeap);
 	ReleaseCom(&outputBgHeap[0]);
 	ReleaseCom(&outputBgHeap[1]);
+	ReleaseCom(&rtUIHeap);
+	ReleaseCom(&frameGenCompositeHeap);
+	ReleaseCom(&frameGenCompositeOutputRtvHeap);
 }
 
 void RT64::View::createInstanceTransformsBuffer() {
@@ -667,7 +783,7 @@ void RT64::View::createCustomPostProcessInput(int width, int height) {
 
 	const bool resizeNeeded = (customPostProcessInputWidth != width) || (customPostProcessInputHeight != height) || customPostProcessInput.IsNull();
 	if (resizeNeeded) {
-		customPostProcessInput.Release();
+		scene->getDevice()->deferRelease(customPostProcessInput);
 		customPostProcessInputWidth = width;
 		customPostProcessInputHeight = height;
 		createCustomPostProcessInputResource(width, height);
@@ -783,6 +899,40 @@ void RT64::View::updatePostProcessUniforms() {
 		postProcessUniformAddresses[block.shaderRegister] = gpuStart + slotOffset;
 		nextSlot += rt64_uniform_slot_count(blockSize);
 	}
+}
+
+void RT64::View::updateFrameGenPostProcessUniforms() {
+	if (!frameGenEnabled || postProcessUniformBuffer.IsNull() || (postProcessUniformBufferMapped == nullptr)) {
+		return;
+	}
+
+	const int writeSlot = rtSwap ? 1 : 0;
+	const uint32_t neededSize = postProcessUniformBufferSize;
+	if (frameGenPostProcessUniformBufferSize[writeSlot] < neededSize) {
+		scene->getDevice()->deferRelease(frameGenPostProcessUniformBuffer[writeSlot]);
+		frameGenPostProcessUniformBufferMapped[writeSlot] = nullptr;
+		frameGenPostProcessUniformBuffer[writeSlot] = scene->getDevice()->allocateBuffer(D3D12_HEAP_TYPE_UPLOAD, neededSize, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		frameGenPostProcessUniformBufferSize[writeSlot] = neededSize;
+
+		if (!frameGenPostProcessUniformBuffer[writeSlot].IsNull()) {
+			CD3DX12_RANGE readRange(0, 0);
+			D3D12_CHECK(frameGenPostProcessUniformBuffer[writeSlot].Get()->Map(0, &readRange, reinterpret_cast<void **>(&frameGenPostProcessUniformBufferMapped[writeSlot])));
+		}
+	}
+
+	if (frameGenPostProcessUniformBufferMapped[writeSlot] == nullptr) {
+		return;
+	}
+
+	memcpy(frameGenPostProcessUniformBufferMapped[writeSlot], postProcessUniformBufferMapped, neededSize);
+
+	const D3D12_GPU_VIRTUAL_ADDRESS myGpuStart = frameGenPostProcessUniformBuffer[writeSlot].Get()->GetGPUVirtualAddress();
+	const D3D12_GPU_VIRTUAL_ADDRESS srcGpuStart = postProcessUniformBuffer.Get()->GetGPUVirtualAddress();
+	for (uint32_t i = 0; i < RT64_MAX_SHADER_UNIFORM_BLOCKS; i++) {
+		frameGenPostProcessUniformAddresses[writeSlot][i] = myGpuStart + (postProcessUniformAddresses[i] - srcGpuStart);
+	}
+
+	frameGenReadableSlot.store(writeSlot, std::memory_order_release);
 }
 
 uint32_t RT64::View::customTextureHeapStart() {
@@ -1790,6 +1940,10 @@ void RT64::View::update() {
 void RT64::View::render(float deltaTimeMs) {
 	RT64_LOG_PRINTF("Started view render");
 
+	frameGenUIRendered = false;
+	frameGenFrameID = globalParamsBufferData.frameCount;
+	frameGenFramePrepared = false;
+
 	if (descriptorHeap == nullptr) {
 		return;
 	}
@@ -1987,6 +2141,7 @@ void RT64::View::render(float deltaTimeMs) {
 	ID3D12PipelineState *customPostProcess = scene->getDevice()->getCustomPostProcessPipelineState();
 
 	updatePostProcessUniforms();
+	updateFrameGenPostProcessUniforms();
 	auto bindPostProcessUniforms = [this, d3dCommandList]() {
 		for (UINT reg = 1; reg < RT64_MAX_SHADER_UNIFORM_BLOCKS; reg++) {
 			d3dCommandList->SetGraphicsRootConstantBufferView(reg, postProcessUniformAddresses[reg]);
@@ -2262,16 +2417,32 @@ void RT64::View::render(float deltaTimeMs) {
 			d3dCommandList->ResourceBarrier(static_cast<UINT>(afterBarriers.size()), afterBarriers.data());
 		}
 
+		if (frameGenEnabled && !frameGenSuspended && frameGen->isInitialized()) {
+			ID3D12Resource *rtDepthCur = rtDepth[rtSwap ? 1 : 0].Get();
+			const RT64_VECTOR3 cameraPosition = getViewPosition();
+			const RT64_VECTOR3 cameraForward = Normalize(getViewDirection());
+			const RT64_VECTOR3 cameraUpVec = Normalize(RT64_VECTOR3{ globalParamsBufferData.cameraV.x, globalParamsBufferData.cameraV.y, globalParamsBufferData.cameraV.z });
+			const RT64_VECTOR3 cameraRightVec = Normalize(RT64_VECTOR3{ globalParamsBufferData.cameraU.x, globalParamsBufferData.cameraU.y, globalParamsBufferData.cameraU.z });
+
+			frameGenFrameReset = frameGenResetPending;
+			frameGen->dispatchPrepare(rtDepthCur, rtFlow.Get(), rtWidth, rtHeight, -globalParamsBufferData.pixelJitter.x, -globalParamsBufferData.pixelJitter.y,
+				deltaTimeMs, nearDist, farDist, fovRadians, cameraPosition, cameraUpVec, cameraRightVec, cameraForward, frameGenFrameID, frameGenFrameReset);
+
+			frameGenResetPending = false;
+			frameGenFramePrepared = true;
+		}
+
 		// A caller supplied post process shader that asked for a size of its own gets the scene
 		// resolved into a buffer that size first, and then reads from that instead of the full
 		// sized image. This is what lets a shader written around a low resolution see one.
 		ID3D12DescriptorHeap *postProcessSourceHeap = postProcessHeap;
 		const int customWidth = scene->getDevice()->getCustomPostProcessWidth();
 		const int customHeight = scene->getDevice()->getCustomPostProcessHeight();
-		const bool resolveToCustomSize = (customPostProcess != nullptr) && (customWidth > 0) && (customHeight > 0) &&
+		const bool customSizeRequested = (customPostProcess != nullptr) && (customWidth > 0) && (customHeight > 0) &&
 			(globalParamsBufferData.visualizationMode == VisualizationModeFinal);
+		const bool resolveToCustomSize = customSizeRequested && !frameGenCompositeActive();
 
-		if (resolveToCustomSize) {
+		if (customSizeRequested) {
 			createCustomPostProcessInput(customWidth, customHeight);
 		}
 
@@ -2316,10 +2487,12 @@ void RT64::View::render(float deltaTimeMs) {
 			viewport = resolveViewport;
 			scissorRect = resolveScissor;
 
-			resetScissor();
-			resetViewport();
-			drawInstances(rasterFgInstances, (UINT)(rasterBgInstances.size() + rtInstances.size()), true, contentX, contentY, rectScaleX, rectScaleY);
-			foregroundAlreadyDrawn = true;
+			if (!frameGenCompositeActive()) {
+				resetScissor();
+				resetViewport();
+				drawInstances(rasterFgInstances, (UINT)(rasterBgInstances.size() + rtInstances.size()), true, contentX, contentY, rectScaleX, rectScaleY);
+				foregroundAlreadyDrawn = true;
+			}
 
 			viewport = screenViewport;
 			scissorRect = screenScissorRect;
@@ -2344,7 +2517,8 @@ void RT64::View::render(float deltaTimeMs) {
 		if (globalParamsBufferData.visualizationMode == VisualizationModeFinal) {
 			RT64_LOG_PRINTF("Drawing final output");
 			std::array<ID3D12DescriptorHeap *, 1> postProcessHeaps = { postProcessSourceHeap };
-			d3dCommandList->SetPipelineState((customPostProcess != nullptr) ? customPostProcess : scene->getDevice()->getPostProcessPipelineState());
+			ID3D12PipelineState *finalPipeline = ((customPostProcess != nullptr) && !frameGenCompositeActive()) ? customPostProcess : scene->getDevice()->getPostProcessPipelineState();
+			d3dCommandList->SetPipelineState(finalPipeline);
 			d3dCommandList->SetGraphicsRootSignature(scene->getDevice()->getPostProcessRootSignature());
 			d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(postProcessHeaps.size()), postProcessHeaps.data());
 			d3dCommandList->SetGraphicsRootDescriptorTable(0, postProcessSourceHeap->GetGPUDescriptorHandleForHeapStart());
@@ -2368,10 +2542,11 @@ void RT64::View::render(float deltaTimeMs) {
 	else {
 		const int customWidth = scene->getDevice()->getCustomPostProcessWidth();
 		const int customHeight = scene->getDevice()->getCustomPostProcessHeight();
-		const bool filterFlatFrame = (customPostProcess != nullptr) && (customWidth > 0) && (customHeight > 0) &&
+		const bool customSizeRequested = (customPostProcess != nullptr) && (customWidth > 0) && (customHeight > 0) &&
 			(globalParamsBufferData.visualizationMode == VisualizationModeFinal);
+		const bool filterFlatFrame = customSizeRequested && !frameGenCompositeActive();
 
-		if (filterFlatFrame) {
+		if (customSizeRequested) {
 			createCustomPostProcessInput(customWidth, customHeight);
 		}
 
@@ -2406,10 +2581,12 @@ void RT64::View::render(float deltaTimeMs) {
 			resetViewport();
 			drawInstances(rasterBgInstances, (UINT)(rtInstances.size()), true, 0.0f, 0.0f, rectScaleX, rectScaleY);
 
-			resetScissor();
-			resetViewport();
-			drawInstances(rasterFgInstances, (UINT)(rasterBgInstances.size() + rtInstances.size()), true, 0.0f, 0.0f, rectScaleX, rectScaleY);
-			foregroundAlreadyDrawn = true;
+			if (!frameGenCompositeActive()) {
+				resetScissor();
+				resetViewport();
+				drawInstances(rasterFgInstances, (UINT)(rasterBgInstances.size() + rtInstances.size()), true, 0.0f, 0.0f, rectScaleX, rectScaleY);
+				foregroundAlreadyDrawn = true;
+			}
 
 			viewport = screenViewport;
 			scissorRect = screenScissorRect;
@@ -2441,9 +2618,25 @@ void RT64::View::render(float deltaTimeMs) {
 	// Draw the foreground to the screen.
 	if (!foregroundAlreadyDrawn) {
 		RT64_LOG_PRINTF("Drawing foreground instances");
+
+		if (frameGenCompositeActive()) {
+			CD3DX12_RESOURCE_BARRIER toRenderTarget = CD3DX12_RESOURCE_BARRIER::Transition(rtUI.Get(), FrameGenUIReadState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+			d3dCommandList->ResourceBarrier(1, &toRenderTarget);
+
+			CD3DX12_CPU_DESCRIPTOR_HANDLE uiRtvHandle(rtUIHeap->GetCPUDescriptorHandleForHeapStart());
+			const float transparentClear[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			d3dCommandList->ClearRenderTargetView(uiRtvHandle, transparentClear, 0, nullptr);
+			d3dCommandList->OMSetRenderTargets(1, &uiRtvHandle, FALSE, nullptr);
+			frameGenUIRendered = true;
+		}
+
 		resetScissor();
 		resetViewport();
 		drawInstances(rasterFgInstances, (UINT)(rasterBgInstances.size() + rtInstances.size()), true);
+	}
+
+	if (!frameGenFramePrepared) {
+		frameGenResetPending = true;
 	}
 
 	// End the frame.
@@ -2886,6 +3079,238 @@ bool RT64::View::getUpscalerAccelerated(UpscaleMode mode) const {
 	}
 }
 
+void RT64::View::setFrameGenEnabled(bool v) {
+	if (frameGenEnabled != v) {
+		frameGenEnabled = v;
+		rtRecreateBuffers = true;
+	}
+}
+
+bool RT64::View::getFrameGenEnabled() const {
+	return frameGenEnabled;
+}
+
+void RT64::View::setFrameGenSuspended(bool v) {
+	frameGenSuspended = v;
+}
+
+bool RT64::View::getFrameGenSuspended() const {
+	return frameGenSuspended;
+}
+
+RT64::FrameGen *RT64::View::getFrameGen() const {
+	return frameGen;
+}
+
+uint64_t RT64::View::getFrameGenFrameID() const {
+	return frameGenFrameID;
+}
+
+bool RT64::View::getFrameGenFrameReset() const {
+	return frameGenFrameReset;
+}
+
+bool RT64::View::getFrameGenFramePrepared() const {
+	return frameGenFramePrepared;
+}
+
+bool RT64::View::frameGenCompositeActive() const {
+	return frameGenEnabled && frameGen->isInitialized() && scene->getDevice()->isFrameGenSwapChainActive() &&
+		(rtUIHeap != nullptr) && (frameGenCompositeHeap != nullptr);
+}
+
+void RT64::View::releaseFrameGen() {
+	if (frameGen->isInitialized() && scene->getDevice()->isFrameGenSwapChainActive()) {
+		frameGen->configure(scene->getDevice()->getD3D12SwapChain(), false, frameGenFrameID);
+	}
+
+	frameGen->release();
+}
+
+void RT64::View::runFrameGenPresentComposite(const FrameGenPresentParams &params) {
+	if (params.isGeneratedFrame) {
+		frameGenGeneratedFrameCount.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	if ((frameGenCompositeHeap == nullptr) || (frameGenCompositeOutputRtvHeap == nullptr) ||
+		(params.commandList == nullptr) || (params.backBufferColor == nullptr) || (params.outputColor == nullptr)) {
+		return;
+	}
+
+	ID3D12GraphicsCommandList *cmdList = static_cast<ID3D12GraphicsCommandList *>(params.commandList);
+	ID3D12Device *d3dDevice = scene->getDevice()->getD3D12Device();
+	ID3D12RootSignature *postProcessRootSignature = scene->getDevice()->getPostProcessRootSignature();
+	ID3D12PipelineState *copyPipeline = scene->getDevice()->getUICompositePipelineState();
+	ID3D12PipelineState *customPostProcess = scene->getDevice()->getCustomPostProcessPipelineState();
+	const int customWidth = scene->getDevice()->getCustomPostProcessWidth();
+	const int customHeight = scene->getDevice()->getCustomPostProcessHeight();
+	const int uniformSlot = frameGenReadableSlot.load(std::memory_order_acquire);
+	const D3D12_RESOURCE_STATES ReadState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	const UINT compositeIncrement = d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	const float opaqueBlack[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	ID3D12DescriptorHeap *compositeHeaps[] = { frameGenCompositeHeap };
+
+	const bool compositeThroughCustomInput = (customPostProcess != nullptr) && (customWidth > 0) && (customHeight > 0) &&
+		!customPostProcessInput.IsNull() && (customPostProcessInputRtvHeap != nullptr) && (customPostProcessInputHeap != nullptr);
+
+	auto bindColorTable = [&](ID3D12Resource *color) {
+		const uint32_t table = frameGenCompositeTable;
+		frameGenCompositeTable = (frameGenCompositeTable + 1) % FrameGenCompositeTableCount;
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Texture2D.MipLevels = 1;
+		srvDesc.Texture2D.MostDetailedMip = 0;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+		D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = frameGenCompositeHeap->GetCPUDescriptorHandleForHeapStart();
+		cpuHandle.ptr += (SIZE_T)(table) * FrameGenCompositeTableSize * compositeIncrement;
+		d3dDevice->CreateShaderResourceView(color, &srvDesc, cpuHandle);
+
+		D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle = frameGenCompositeHeap->GetGPUDescriptorHandleForHeapStart();
+		gpuHandle.ptr += (UINT64)(table) * FrameGenCompositeTableSize * compositeIncrement;
+
+		cmdList->SetGraphicsRootSignature(postProcessRootSignature);
+		cmdList->SetDescriptorHeaps(1, compositeHeaps);
+		cmdList->SetGraphicsRootDescriptorTable(0, gpuHandle);
+	};
+
+	auto bindPostProcessUniforms = [&]() {
+		if (uniformSlot >= 0) {
+			for (UINT reg = 1; reg < RT64_MAX_SHADER_UNIFORM_BLOCKS; reg++) {
+				cmdList->SetGraphicsRootConstantBufferView(reg, frameGenPostProcessUniformAddresses[uniformSlot][reg]);
+			}
+		}
+	};
+
+	auto setTarget = [&](D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle, int targetWidth, int targetHeight) {
+		cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+		cmdList->ClearRenderTargetView(rtvHandle, opaqueBlack, 0, nullptr);
+
+		const D3D12_VIEWPORT viewportDesc = { 0.0f, 0.0f, (float)(targetWidth), (float)(targetHeight), 0.0f, 1.0f };
+		const D3D12_RECT scissorDesc = { 0, 0, (LONG)(targetWidth), (LONG)(targetHeight) };
+		cmdList->RSSetViewports(1, &viewportDesc);
+		cmdList->RSSetScissorRects(1, &scissorDesc);
+	};
+
+	auto drawFullScreen = [&]() {
+		cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		cmdList->IASetVertexBuffers(0, 0, nullptr);
+		cmdList->DrawInstanced(3, 1, 0, 0);
+	};
+
+	const bool backBufferNeedsTransition = (params.backBufferColorState != ReadState);
+	if (backBufferNeedsTransition) {
+		CD3DX12_RESOURCE_BARRIER toRead = CD3DX12_RESOURCE_BARRIER::Transition(params.backBufferColor, params.backBufferColorState, ReadState);
+		cmdList->ResourceBarrier(1, &toRead);
+	}
+
+	const bool uiAvailable = (params.uiColor != nullptr);
+	const bool uiNeedsTransition = uiAvailable && (params.uiColorState != ReadState);
+	if (uiNeedsTransition) {
+		CD3DX12_RESOURCE_BARRIER toRead = CD3DX12_RESOURCE_BARRIER::Transition(params.uiColor, params.uiColorState, ReadState);
+		cmdList->ResourceBarrier(1, &toRead);
+	}
+
+	if (compositeThroughCustomInput) {
+		CD3DX12_RESOURCE_BARRIER toTarget = CD3DX12_RESOURCE_BARRIER::Transition(customPostProcessInput.Get(), ReadState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		cmdList->ResourceBarrier(1, &toTarget);
+
+		CD3DX12_CPU_DESCRIPTOR_HANDLE inputRtvHandle(customPostProcessInputRtvHeap->GetCPUDescriptorHandleForHeapStart());
+		setTarget(inputRtvHandle, customWidth, customHeight);
+
+		cmdList->SetPipelineState(copyPipeline);
+		bindColorTable(params.backBufferColor);
+		drawFullScreen();
+
+		if (uiAvailable) {
+			bindColorTable(params.uiColor);
+			drawFullScreen();
+		}
+
+		CD3DX12_RESOURCE_BARRIER toRead = CD3DX12_RESOURCE_BARRIER::Transition(customPostProcessInput.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, ReadState);
+		cmdList->ResourceBarrier(1, &toRead);
+	}
+
+	D3D12_RENDER_TARGET_VIEW_DESC outputRtvDesc = {};
+	outputRtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	outputRtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE outputRtvHandle = frameGenCompositeOutputRtvHeap->GetCPUDescriptorHandleForHeapStart();
+	d3dDevice->CreateRenderTargetView(params.outputColor, &outputRtvDesc, outputRtvHandle);
+
+	const bool outputNeedsTransition = (params.outputColorState != D3D12_RESOURCE_STATE_RENDER_TARGET);
+	if (outputNeedsTransition) {
+		CD3DX12_RESOURCE_BARRIER toRenderTarget = CD3DX12_RESOURCE_BARRIER::Transition(params.outputColor, params.outputColorState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		cmdList->ResourceBarrier(1, &toRenderTarget);
+	}
+
+	setTarget(outputRtvHandle, getWidth(), getHeight());
+
+	if (compositeThroughCustomInput) {
+		std::array<ID3D12DescriptorHeap *, 1> inputHeaps = { customPostProcessInputHeap };
+		cmdList->SetPipelineState(customPostProcess);
+		cmdList->SetGraphicsRootSignature(postProcessRootSignature);
+		cmdList->SetDescriptorHeaps(static_cast<UINT>(inputHeaps.size()), inputHeaps.data());
+		cmdList->SetGraphicsRootDescriptorTable(0, customPostProcessInputHeap->GetGPUDescriptorHandleForHeapStart());
+		bindPostProcessUniforms();
+		drawFullScreen();
+	}
+	else {
+		cmdList->SetPipelineState((customPostProcess != nullptr) ? customPostProcess : copyPipeline);
+		bindColorTable(params.backBufferColor);
+		bindPostProcessUniforms();
+		drawFullScreen();
+
+		if (uiAvailable) {
+			cmdList->SetPipelineState(copyPipeline);
+			bindColorTable(params.uiColor);
+			drawFullScreen();
+		}
+	}
+
+	if (outputNeedsTransition) {
+		CD3DX12_RESOURCE_BARRIER toOriginal = CD3DX12_RESOURCE_BARRIER::Transition(params.outputColor, D3D12_RESOURCE_STATE_RENDER_TARGET, params.outputColorState);
+		cmdList->ResourceBarrier(1, &toOriginal);
+	}
+
+	if (uiNeedsTransition) {
+		CD3DX12_RESOURCE_BARRIER toOriginal = CD3DX12_RESOURCE_BARRIER::Transition(params.uiColor, ReadState, params.uiColorState);
+		cmdList->ResourceBarrier(1, &toOriginal);
+	}
+
+	if (backBufferNeedsTransition) {
+		CD3DX12_RESOURCE_BARRIER toOriginal = CD3DX12_RESOURCE_BARRIER::Transition(params.backBufferColor, ReadState, params.backBufferColorState);
+		cmdList->ResourceBarrier(1, &toOriginal);
+	}
+}
+
+bool RT64::View::getFrameGenUIRenderTargetView(CD3DX12_CPU_DESCRIPTOR_HANDLE &outHandle) const {
+	if (!frameGenUIRendered) {
+		return false;
+	}
+
+	outHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(rtUIHeap->GetCPUDescriptorHandleForHeapStart());
+	return true;
+}
+
+ID3D12Resource *RT64::View::finishFrameGenUI() {
+	if (!frameGenUIRendered) {
+		return nullptr;
+	}
+
+	auto d3dCommandList = scene->getDevice()->getD3D12CommandList();
+	CD3DX12_RESOURCE_BARRIER toReadState = CD3DX12_RESOURCE_BARRIER::Transition(rtUI.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, FrameGenUIReadState);
+	d3dCommandList->ResourceBarrier(1, &toReadState);
+
+	return rtUI.Get();
+}
+
+uint64_t RT64::View::getFrameGenGeneratedFrameCount() const {
+	return frameGenGeneratedFrameCount.load(std::memory_order_relaxed);
+}
+
 // Public
 
 DLLEXPORT RT64_VIEW *RT64_CreateView(RT64_SCENE *scenePtr) {
@@ -2956,6 +3381,8 @@ DLLEXPORT void RT64_GetViewDescription(RT64_VIEW *viewPtr, RT64_VIEW_DESC *outVi
 	}
 
 	outViewDesc->upscalerSharpness = view->getUpscalerSharpness();
+	outViewDesc->frameGenEnabled = view->getFrameGenEnabled();
+	outViewDesc->frameGenSuspended = view->getFrameGenSuspended();
 }
 
 DLLEXPORT void RT64_SetViewDescription(RT64_VIEW *viewPtr, RT64_VIEW_DESC viewDesc) {
@@ -3029,6 +3456,8 @@ DLLEXPORT void RT64_SetViewDescription(RT64_VIEW *viewPtr, RT64_VIEW_DESC viewDe
 	}
 
 	view->setUpscalerSharpness(viewDesc.upscalerSharpness);
+	view->setFrameGenEnabled(viewDesc.frameGenEnabled);
+	view->setFrameGenSuspended(viewDesc.frameGenSuspended);
 }
 
 DLLEXPORT void RT64_SetViewSkyPlane(RT64_VIEW *viewPtr, RT64_TEXTURE *texturePtr) {
@@ -3058,6 +3487,12 @@ DLLEXPORT bool RT64_GetViewUpscalerSupport(RT64_VIEW *viewPtr, int upscaler) {
 	default:
 		return false;
 	}
+}
+
+DLLEXPORT unsigned long long RT64_GetViewGeneratedFrameCount(RT64_VIEW *viewPtr) {
+	assert(viewPtr != nullptr);
+	RT64::View *view = (RT64::View *)(viewPtr);
+	return view->getFrameGenGeneratedFrameCount();
 }
 
 DLLEXPORT void RT64_DestroyView(RT64_VIEW *viewPtr) {
