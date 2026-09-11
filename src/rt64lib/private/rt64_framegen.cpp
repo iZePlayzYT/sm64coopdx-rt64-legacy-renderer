@@ -83,6 +83,10 @@ public:
             return false;
         }
 
+        if (device->isAmdGpu()) {
+            return false;
+        }
+
         release();
 
         ffx::CreateBackendDX12Desc backendDesc{};

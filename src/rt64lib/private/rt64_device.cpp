@@ -65,6 +65,7 @@
 
 RT64::Device::Device(HWND hwnd) {
 	RT64_LOG_OPEN("rt64.log");
+	amdGpu = false;
 
 	createDXGIFactory();
 	createRaytracingDevice();
@@ -319,6 +320,7 @@ void RT64::Device::createDXGIFactory() {
 void RT64::Device::createRaytracingDevice() {
 	d3dAdapter = nullptr;
 	d3dDevice = nullptr;
+	amdGpu = false;
 #ifndef RT64_MINIMAL
 	disableMipmaps = false;
 #endif
@@ -363,12 +365,15 @@ void RT64::Device::createRaytracingDevice() {
 		d3dAdapter = adapter;
 		d3dAdapter->AddRef();
 
-#ifndef RT64_MINIMAL
-		// AMD mipmap generation is corrupted on this backend (https://github.com/DarioSamo/RT64/issues/54).
 		if (desc.VendorId == 0x1002) {
+			amdGpu = true;
+#ifndef RT64_MINIMAL
+			// AMD mipmap generation is corrupted on this backend (https://github.com/DarioSamo/RT64/issues/54).
 			disableMipmaps = true;
-		}
 #endif
+			fprintf(stderr, "RT64: AMD GPU detected; FSR frame generation is disabled\n");
+			RT64_LOG_PRINTF("AMD GPU detected; FSR frame generation is disabled");
+		}
 
 		RT64_LOG_PRINTF("Selected adapter: %s", win32::Utf16ToUtf8(desc.Description).c_str());
 		return true;
@@ -502,6 +507,10 @@ void RT64::Device::createRTVs() {
 
 HWND RT64::Device::getHwnd() const {
 	return hwnd;
+}
+
+bool RT64::Device::isAmdGpu() const {
+	return amdGpu;
 }
 
 ID3D12Device8 *RT64::Device::getD3D12Device() const {
@@ -1943,6 +1952,10 @@ void RT64::Device::postRender(int vsyncInterval, View *activeView, bool frameGen
 }
 
 bool RT64::Device::enableFrameGenSwapChain() {
+	if (isAmdGpu()) {
+		return false;
+	}
+
 	if (fgSwapChainActive) {
 		return true;
 	}
@@ -2050,7 +2063,7 @@ void RT64::Device::draw(int vsyncInterval, float deltaTimeMs) {
 		}
 	}
 
-	const bool frameGenEnabled = (activeView != nullptr) && activeView->getFrameGen()->isInitialized() &&
+	const bool frameGenEnabled = (activeView != nullptr) && !isAmdGpu() && activeView->getFrameGen()->isInitialized() &&
 		activeView->getFrameGenEnabled() && enableFrameGenSwapChain();
 
 	d3dFrameIndex = d3dSwapChain->GetCurrentBackBufferIndex();

@@ -3107,6 +3107,12 @@ bool RT64::View::getUpscalerAccelerated(UpscaleMode mode) const {
 }
 
 void RT64::View::setFrameGenEnabled(bool v) {
+	if (scene->getDevice()->isAmdGpu()) {
+		if (v) {
+			fprintf(stderr, "RT64: FSR frame generation is disabled on AMD\n");
+		}
+		v = false;
+	}
 	if (frameGenEnabled != v) {
 		frameGenEnabled = v;
 		rtRecreateBuffers = true;

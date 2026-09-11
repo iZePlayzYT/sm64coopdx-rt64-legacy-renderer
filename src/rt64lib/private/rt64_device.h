@@ -36,6 +36,7 @@ namespace RT64 {
 		IDXGIAdapter1 *d3dAdapter;
 		ID3D12Device8 *d3dDevice;
 		IDXGIFactory4 *dxgiFactory;
+		bool amdGpu;
 
 		void createDXGIFactory();
 		void createRaytracingDevice();
@@ -192,6 +193,7 @@ namespace RT64 {
 		void addInspector(Inspector* inspector);
 		void removeInspector(Inspector* inspector);
 		HWND getHwnd() const;
+		bool isAmdGpu() const;
 		ID3D12Device8 *getD3D12Device() const;
 		D3D12MA::Allocator *getD3D12Allocator() const;
 		ID3D12GraphicsCommandList4 *getD3D12CommandList() const;
