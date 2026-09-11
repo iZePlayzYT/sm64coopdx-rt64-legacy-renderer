@@ -26,6 +26,7 @@
 
 namespace {
 	const int MaxQueries = 16 + 1;
+	constexpr float AmdInternalResolutionScaleCap = 0.67f;
 
 	const D3D12_RESOURCE_STATES FrameGenUIReadState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
@@ -218,6 +219,23 @@ void RT64::View::createOutputBuffers() {
 
 	// Choose upscaler.
 	Upscaler *upscaler = getUpscaler(rtUpscaleMode);
+	auto capAmdInternalResolution = [&]() {
+		if (!scene->getDevice()->isAmdGpu()) {
+			return;
+		}
+
+		const int requestedWidth = rtWidth;
+		const int requestedHeight = rtHeight;
+		const int capWidth = std::max(1, static_cast<int>(lround(screenWidth * AmdInternalResolutionScaleCap)));
+		const int capHeight = std::max(1, static_cast<int>(lround(screenHeight * AmdInternalResolutionScaleCap)));
+		rtWidth = std::min(rtWidth, capWidth);
+		rtHeight = std::min(rtHeight, capHeight);
+		if ((rtWidth != requestedWidth) || (rtHeight != requestedHeight)) {
+			fprintf(stdout, "RT64: AMD internal raytracing resolution capped from %dX%d to %dX%d.\n",
+				requestedWidth, requestedHeight, rtWidth, rtHeight);
+		}
+	};
+
 	if ((upscaler != nullptr) && upscaler->isInitialized()) {
 		int upscalerWidth, upscalerHeight;
 		Upscaler::QualityMode setQuality = Upscaler::QualityMode::Balanced;
@@ -235,6 +253,7 @@ void RT64::View::createOutputBuffers() {
 			rtHeight = screenHeight;
 		}
 
+		capAmdInternalResolution();
 		upscaler->set(setQuality, rtWidth, rtHeight, screenWidth, screenHeight);
 
 		rtUpscaleActive = true;
@@ -242,6 +261,7 @@ void RT64::View::createOutputBuffers() {
 	else {
 		rtWidth = lround(screenWidth * resolutionScale);
 		rtHeight = lround(screenHeight * resolutionScale);
+		capAmdInternalResolution();
 		rtUpscaleActive = false;
 	}
 
