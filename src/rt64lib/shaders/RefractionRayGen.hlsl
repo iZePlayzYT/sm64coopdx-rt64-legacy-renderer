@@ -66,7 +66,7 @@ void RefractionRayGen() {
 	float3 resTransparent = float3(0.0f, 0.0f, 0.0f);
 	float depthWriteT = RAY_MAX_DISTANCE;
 	float depthWriteOrder = 0.0f;
-	for (uint hit = 0; hit < payload.nhits; hit++) {
+	for (uint hit = 0; hit < min(payload.nhits, MAX_HIT_QUERIES); hit++) {
 		uint hitBufferIndex = getHitBufferIndex(hit, launchIndex, launchDims);
 		float4 hitColor = gHitColor[hitBufferIndex];
 

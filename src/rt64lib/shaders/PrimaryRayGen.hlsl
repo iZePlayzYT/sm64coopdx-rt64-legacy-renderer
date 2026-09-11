@@ -85,7 +85,7 @@ void PrimaryRayGen() {
 	int resPickInstanceId = -1;
 	float depthWriteT = RAY_MAX_DISTANCE;
 	float depthWriteOrder = 0.0f;
-	for (uint hit = 0; hit < payload.nhits; hit++) {
+	for (uint hit = 0; hit < min(payload.nhits, MAX_HIT_QUERIES); hit++) {
 		uint hitBufferIndex = getHitBufferIndex(hit, launchIndex, launchDims);
 		float4 hitColor = gHitColor[hitBufferIndex];
 		uint hitInstanceId = gHitInstanceId[hitBufferIndex];

@@ -1214,13 +1214,25 @@ void RT64::Device::loadDummyResources() {
 	dummyBlack->setRGBA8(dummyBlackPixel, sizeof(dummyBlackPixel), 1, 1, 4, false);
 
 	const uint64_t dummySize = 512;
-	dummyStructuredBuffer = allocateBuffer(D3D12_HEAP_TYPE_UPLOAD, dummySize, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-	if (!dummyStructuredBuffer.IsNull()) {
+	AllocatedResource dummyUpload = allocateBuffer(D3D12_HEAP_TYPE_UPLOAD, dummySize, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+	dummyStructuredBuffer = allocateBuffer(D3D12_HEAP_TYPE_DEFAULT, dummySize, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+	if (!dummyUpload.IsNull() && !dummyStructuredBuffer.IsNull()) {
 		void *mapped = nullptr;
-		D3D12_CHECK(dummyStructuredBuffer.Get()->Map(0, nullptr, &mapped));
+		D3D12_CHECK(dummyUpload.Get()->Map(0, nullptr, &mapped));
 		memset(mapped, 0, static_cast<size_t>(dummySize));
-		dummyStructuredBuffer.Get()->Unmap(0, nullptr);
+		dummyUpload.Get()->Unmap(0, nullptr);
+
+		d3dCommandList->CopyBufferRegion(dummyStructuredBuffer.Get(), 0, dummyUpload.Get(), 0, dummySize);
+		CD3DX12_RESOURCE_BARRIER toSrv = CD3DX12_RESOURCE_BARRIER::Transition(
+			dummyStructuredBuffer.Get(),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		d3dCommandList->ResourceBarrier(1, &toSrv);
+		submitCommandList();
+		waitForGPU();
+		resetCommandList();
 	}
+	dummyUpload.Release();
 }
 
 void RT64::Device::createRaytracingPipeline() {

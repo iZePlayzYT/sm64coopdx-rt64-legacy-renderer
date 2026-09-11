@@ -2264,7 +2264,7 @@ void RT64::View::render(float deltaTimeMs) {
 			d3dCommandList->ResourceBarrier(1, &refractionBarrier);
 		}
 
-		const bool volumetricLights = scene->getVolumetricLights();
+		const bool volumetricLights = scene->getVolumetricLights() && (scene->getLightsCount() > 0);
 		if (volumetricLights) {
 			RT64_LOG_PRINTF("Dispatching volumetric light rays");
 			desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 5;

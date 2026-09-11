@@ -28,8 +28,7 @@ void VolumetricRayGen() {
 	float maxDist = (instanceId >= 0) ? length(shadingPosition - rayOrigin) : RAY_MAX_DISTANCE;
 
 	float3 result = float3(0.0f, 0.0f, 0.0f);
-	uint lightCount, lightStride;
-	SceneLights.GetDimensions(lightCount, lightStride);
+	uint lightCount = GetSceneLightCount();
 	for (uint l = 0; l < lightCount; l++) {
 		if ((SceneLights[l].lightType != RT64_LIGHT_TYPE_POINT) || (SceneLights[l].volumetricEnabled == 0)) {
 			continue;

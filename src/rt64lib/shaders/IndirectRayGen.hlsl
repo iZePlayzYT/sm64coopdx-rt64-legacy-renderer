@@ -72,7 +72,7 @@ void IndirectRayGen() {
 			float3 resNormal = float3(0.0f, 0.0f, 0.0f);
 			float4 resColor = float4(0, 0, 0, 1);
 			int resInstanceId = -1;
-			for (uint hit = 0; hit < payload.nhits; hit++) {
+			for (uint hit = 0; hit < min(payload.nhits, MAX_HIT_QUERIES); hit++) {
 				uint hitBufferIndex = getHitBufferIndex(hit, launchIndex, launchDims);
 				float4 hitColor = gHitColor[hitBufferIndex];
 				float alphaContrib = (resColor.a * hitColor.a);

@@ -32,8 +32,17 @@ struct LightInfo {
 StructuredBuffer<LightInfo> SceneLights : register(t4);
 
 #define MAX_LIGHTS 16
+#define RT64_SCENE_LIGHTS_MAX 256
 #define RT64_LIGHT_TYPE_POINT 1
 #define RT64_LIGHT_SHAPE_SQUARE 1
+
+// AMD GetDimensions on a bad/upload SRV can return ~4e9. Iterating that per pixel TDRs
+// with DXGI_ERROR_DEVICE_HUNG (0x887A0006). NVIDIA returns 0 or the real count.
+uint GetSceneLightCount() {
+	uint lightCount, lightStride;
+	SceneLights.GetDimensions(lightCount, lightStride);
+	return min(lightCount, RT64_SCENE_LIGHTS_MAX);
+}
 
 void ComputePointLightBasis(float pitch, float yaw, float roll, out float3 lightForward, out float3 lightRight, out float3 lightUp) {
 	float sinYaw = sin(yaw), cosYaw = cos(yaw);
@@ -262,11 +271,10 @@ float3 ComputeLightsRandom(uint2 launchIndex, uint instanceId, float3 position, 
 	float centeredShadowFactor = traceShadows ? TraceCenteredShadow(instanceId, position, normal, centeredInstanceMask) : 1.0f;
 	if (lightGroupMaskBits > 0) {
 		uint sLightCount = 0;
-		uint gLightCount, gLightStride;
+		uint gLightCount = GetSceneLightCount();
 		uint sLightIndices[MAX_LIGHTS + 1];
 		float sLightIntensities[MAX_LIGHTS + 1];
 		float totalLightIntensity = 0.0f;
-		SceneLights.GetDimensions(gLightCount, gLightStride);
 		for (uint l = 0; (l < gLightCount) && (sLightCount < MAX_LIGHTS); l++) {
 			if (lightGroupMaskBits & SceneLights[l].groupBits) {
 				float lightIntensity = CalculateLightIntensitySimple(l, position, normal, ignoreNormalFactor);
