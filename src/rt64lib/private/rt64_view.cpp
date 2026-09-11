@@ -2218,9 +2218,22 @@ void RT64::View::render(float deltaTimeMs) {
 			d3dCommandList->SetComputeRootDescriptorTable(1, rtSamplerTable);
 			d3dCommandList->DispatchRays(&desc);
 		};
+		// Windows TDR is ~2s per ExecuteCommandLists. Primary anyhit plus
+		// shadows in one packet still hangs AMD after a level load.
+		auto flushAmdRayPacket = [&]() {
+			if (!scene->getDevice()->isAmdGpu()) {
+				return;
+			}
+			scene->getDevice()->submitCommandList();
+			scene->getDevice()->waitForGPU();
+			scene->getDevice()->resetCommandList();
+			d3dCommandList->SetPipelineState1(scene->getDevice()->getD3D12RtStateObject());
+			d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data());
+		};
 		d3dCommandList->SetPipelineState1(scene->getDevice()->getD3D12RtStateObject());
 		d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data());
 		dispatchRays();
+		flushAmdRayPacket();
 
 		// Barriers for shading buffers before dispatching secondary rays.
 		CD3DX12_RESOURCE_BARRIER shadingBarriers[] = {
@@ -2240,13 +2253,15 @@ void RT64::View::render(float deltaTimeMs) {
 		RT64_LOG_PRINTF("Dispatching direct light rays");
 		desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize();
 		dispatchRays();
+		flushAmdRayPacket();
 
-		// Dispatch rays for indirect light.
-		if (globalParamsBufferData.giSamples > 0) {
-			RT64_LOG_PRINTF("Dispatching indirect light rays");
-			desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 2;
-			dispatchRays();
-		}
+		// Always dispatch indirect. giSamples==0 still writes ambientBase+ambientNoGI
+		// into the GI buffer. Skipping that left Compose with an uninitialized or
+		// zero buffer: yellow/orange "sunset" lighting and intermittent sparkles.
+		RT64_LOG_PRINTF("Dispatching indirect light rays");
+		desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 2;
+		dispatchRays();
+		flushAmdRayPacket();
 
 		// Wait until indirect light is done before dispatching reflection or refraction rays.
 		// TODO: This is only required to prevent simultaneous usage of the anyhit buffers.
@@ -2258,6 +2273,7 @@ void RT64::View::render(float deltaTimeMs) {
 			RT64_LOG_PRINTF("Dispatching refraction rays");
 			desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 4;
 			dispatchRays();
+			flushAmdRayPacket();
 
 			// Wait until refraction is done before dispatching reflection rays.
 			// TODO: This is only required to prevent simultaneous usage of the anyhit buffers.
@@ -2271,6 +2287,7 @@ void RT64::View::render(float deltaTimeMs) {
 			RT64_LOG_PRINTF("Dispatching volumetric light rays");
 			desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 5;
 			dispatchRays();
+			flushAmdRayPacket();
 		}
 
 		if (rtAnyReflection) {
@@ -2280,6 +2297,7 @@ void RT64::View::render(float deltaTimeMs) {
 				RT64_LOG_PRINTF("Dispatching reflection rays");
 				desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 3;
 				dispatchRays();
+				flushAmdRayPacket();
 				reflections--;
 
 				// Add a barrier to wait for the input UAVs to be finished if there's more passes left to be done.
