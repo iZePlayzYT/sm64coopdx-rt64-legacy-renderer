@@ -2054,6 +2054,14 @@ void RT64::Device::draw(int vsyncInterval, float deltaTimeMs) {
 		scene->update();
 	}
 
+	// AMD TDR is ~2s per submitted GPU packet. BLAS/TLAS builds plus DispatchRays in
+	// one ExecuteCommandLists is enough to hang after a level load. Split them.
+	if (isAmdGpu()) {
+		submitCommandList();
+		waitForGPU();
+		resetCommandList();
+	}
+
 	// Determine the active view (use the first available view for now).
 	View *activeView = nullptr;
 	for (Scene *scene : scenes) {

@@ -375,9 +375,19 @@ namespace RT64 {
         if (FAILED(d3d12CallResult))                                                \
         {																	        \
 			char errorMessage[512];													\
-			snprintf(errorMessage, sizeof(errorMessage), "D3D12 call " #call " "	\
-				"failed with error code %X.", d3d12CallResult);						\
-																					\
+			if ((d3d12CallResult == DXGI_ERROR_DEVICE_REMOVED) ||                   \
+				(d3d12CallResult == DXGI_ERROR_DEVICE_RESET) ||                     \
+				(d3d12CallResult == DXGI_ERROR_DEVICE_HUNG)) {                      \
+				snprintf(errorMessage, sizeof(errorMessage),                        \
+					"D3D12 call " #call " failed with error code %X. "              \
+					"The GPU already hung (same as Present deviceRemovedReason "    \
+					"0x887A0006); this is not an allocator/out-of-memory failure.", \
+					d3d12CallResult);                                               \
+			}                                                                       \
+			else {                                                                  \
+				snprintf(errorMessage, sizeof(errorMessage), "D3D12 call " #call " "	\
+					"failed with error code %X.", d3d12CallResult);					\
+			}                                                                       \
             throw std::runtime_error(errorMessage);                                 \
         }                                                                           \
     } while( 0 )

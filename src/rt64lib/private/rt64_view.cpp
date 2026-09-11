@@ -2242,9 +2242,11 @@ void RT64::View::render(float deltaTimeMs) {
 		dispatchRays();
 
 		// Dispatch rays for indirect light.
-		RT64_LOG_PRINTF("Dispatching indirect light rays");
-		desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 2;
-		dispatchRays();
+		if (globalParamsBufferData.giSamples > 0) {
+			RT64_LOG_PRINTF("Dispatching indirect light rays");
+			desc.RayGenerationShaderRecord.StartAddress = sbtStorage.Get()->GetGPUVirtualAddress() + sbtHelper.GetRayGenEntrySize() * 2;
+			dispatchRays();
+		}
 
 		// Wait until indirect light is done before dispatching reflection or refraction rays.
 		// TODO: This is only required to prevent simultaneous usage of the anyhit buffers.

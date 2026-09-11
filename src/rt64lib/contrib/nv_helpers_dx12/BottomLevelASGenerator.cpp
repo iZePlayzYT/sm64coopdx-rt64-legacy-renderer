@@ -243,5 +243,12 @@ void BottomLevelASGenerator::Generate(
   
   // Build the AS
   commandList->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+  // Top-level AS already waits on its result. Bottom-level builds did not, so
+  // AMD can refit the TLAS / DispatchRays against a BLAS that is still writing.
+  D3D12_RESOURCE_BARRIER uavBarrier = {};
+  uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+  uavBarrier.UAV.pResource = resultBuffer;
+  commandList->ResourceBarrier(1, &uavBarrier);
 }
 } // namespace nv_helpers_dx12

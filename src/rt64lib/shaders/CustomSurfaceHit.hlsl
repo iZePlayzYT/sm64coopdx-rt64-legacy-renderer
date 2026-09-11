@@ -30,6 +30,7 @@ void CustomSurfaceAnyHit(inout HitInfo payload, Attributes attrib) {
 
 	// This hit is beyond a confirmed-opaque surface and is never visible.
 	if (RayTCurrent() > (payload.opaqueT + maxDepthBias)) {
+		IgnoreHit();
 		return;
 	}
 
