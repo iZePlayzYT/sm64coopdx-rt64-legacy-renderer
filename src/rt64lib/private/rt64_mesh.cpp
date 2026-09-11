@@ -231,31 +231,6 @@ DLLEXPORT void RT64_SetMesh(RT64_MESH *meshPtr, void *vertexArray, int vertexCou
 	mesh->updateBottomLevelAS();
 }
 
-DLLEXPORT void *RT64_BeginMeshVertexUpdate(RT64_MESH *meshPtr, int vertexCount, int vertexStride, unsigned int *indexArray, int indexCount) {
-	assert(meshPtr != nullptr);
-	assert(vertexCount > 0);
-	assert(indexArray != nullptr);
-	assert(indexCount > 0);
-	RT64::Mesh *mesh = (RT64::Mesh *)(meshPtr);
-
-	if (mesh->getIndexCount() != indexCount) {
-		mesh->updateIndexBuffer(indexArray, indexCount);
-	}
-
-	return mesh->beginVertexBufferUpdate(vertexCount, vertexStride);
-}
-
-DLLEXPORT void RT64_EndMeshVertexUpdate(RT64_MESH *meshPtr, int vertexCount, int vertexStride, int updateAccelerationStructure) {
-	assert(meshPtr != nullptr);
-	assert(vertexCount > 0);
-	RT64::Mesh *mesh = (RT64::Mesh *)(meshPtr);
-	mesh->endVertexBufferUpdate(vertexCount, vertexStride);
-
-	if (updateAccelerationStructure || (mesh->getBottomLevelASResult() == nullptr)) {
-		mesh->updateBottomLevelAS();
-	}
-}
-
 DLLEXPORT void RT64_SetMeshVertexData(RT64_MESH *meshPtr, void *vertexArray, int vertexCount, int vertexStride, unsigned int *indexArray, int indexCount) {
 	assert(meshPtr != nullptr);
 	assert(vertexArray != nullptr);

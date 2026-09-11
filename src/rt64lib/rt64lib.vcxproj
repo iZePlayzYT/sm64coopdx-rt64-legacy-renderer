@@ -38,6 +38,7 @@
     <ClInclude Include="private\rt64_device.h" />
     <ClInclude Include="private\rt64_dlss.h" />
     <ClInclude Include="private\rt64_fsr.h" />
+    <ClInclude Include="private\rt64_framegen.h" />
     <ClInclude Include="private\rt64_inspector.h" />
     <ClInclude Include="private\rt64_instance.h" />
     <ClInclude Include="private\rt64_mesh.h" />
@@ -73,6 +74,7 @@
     <ClCompile Include="private\rt64_device.cpp" />
     <ClCompile Include="private\rt64_dlss.cpp" />
     <ClCompile Include="private\rt64_fsr.cpp" />
+    <ClCompile Include="private\rt64_framegen.cpp" />
     <ClCompile Include="private\rt64_inspector.cpp" />
     <ClCompile Include="private\rt64_instance.cpp" />
     <ClCompile Include="private\rt64_mesh.cpp" />
@@ -374,6 +376,18 @@
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(RootDir)%(Directory)%(Filename)%(Extension).h</Outputs>
       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">shaders\BgSky.hlsli;shaders\BlueNoise.hlsli;shaders\Color.hlsli;shaders\Constants.hlsli;shaders\Fog.hlsli;shaders\GlobalBuffers.hlsli;shaders\GlobalHitBuffers.hlsli;shaders\GlobalParams.hlsli;shaders\Im3DCommon.hlsli;shaders\Instances.hlsli;shaders\Lights.hlsli;shaders\Materials.hlsli;shaders\Random.hlsli;shaders\Ray.hlsli;shaders\Textures.hlsli;shaders\UberCombiner.hlsli;shaders\UberVertexPull.hlsli</AdditionalInputs>
     </CustomBuild>
+    <CustomBuild Include="shaders\UICompositePS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.\contrib\dxc\bin\x64\dxc.exe %(FullPath) -T ps_6_0 -E PSMain -Fh %(RootDir)%(Directory)%(Filename)%(Extension).h -Vn %(Filename)Blob</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Minimal|x64'">.\contrib\dxc\bin\x64\dxc.exe %(FullPath) -T ps_6_0 -E PSMain -Fh %(RootDir)%(Directory)%(Filename)%(Extension).h -Vn %(Filename)Blob</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.\contrib\dxc\bin\x64\dxc.exe %(FullPath) -T ps_6_0 -E PSMain -Fh %(RootDir)%(Directory)%(Filename)%(Extension).h -Vn %(Filename)Blob</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling %(Filename)%(Extension)</Message>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Minimal|x64'">Compiling %(Filename)%(Extension)</Message>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling %(Filename)%(Extension)</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(RootDir)%(Directory)%(Filename)%(Extension).h</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Minimal|x64'">%(RootDir)%(Directory)%(Filename)%(Extension).h</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(RootDir)%(Directory)%(Filename)%(Extension).h</Outputs>
+    </CustomBuild>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="shaders\GenerateMipsCS.hlsl">
@@ -499,7 +513,7 @@
       <Command>(robocopy "$(ProjectDir)\contrib\dxc\bin\x64" $(TargetDir) dxil.dll dxcompiler.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
 (robocopy "$(ProjectDir)\contrib\DLSS\Lib\Windows_x86_64\dev" $(TargetDir) nvngx_dlss.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
 (robocopy "$(ProjectDir)\contrib\xess\bin" $(TargetDir) libxess.dll igxess.dll XeFX.dll XeFX_Loader.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
-(robocopy "$(ProjectDir)\contrib\FidelityFX-SDK\Kits\FidelityFX\signedbin" $(TargetDir) amd_fidelityfx_loader_dx12.dll amd_fidelityfx_upscaler_dx12.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
+(robocopy "$(ProjectDir)\contrib\FidelityFX-SDK\Kits\FidelityFX\signedbin" $(TargetDir) amd_fidelityfx_loader_dx12.dll amd_fidelityfx_upscaler_dx12.dll amd_fidelityfx_framegeneration_dx12.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
 (robocopy "$(ProjectDir)\contrib\NRD\_Bin\Debug" $(TargetDir) NRD.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -528,7 +542,7 @@
       <Command>(robocopy "$(ProjectDir)\contrib\dxc\bin\x64" $(TargetDir) dxil.dll dxcompiler.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
 (robocopy "$(ProjectDir)\contrib\DLSS\Lib\Windows_x86_64\rel" $(TargetDir) nvngx_dlss.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
 (robocopy "$(ProjectDir)\contrib\xess\bin" $(TargetDir) libxess.dll igxess.dll XeFX.dll XeFX_Loader.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
-(robocopy "$(ProjectDir)\contrib\FidelityFX-SDK\Kits\FidelityFX\signedbin" $(TargetDir) amd_fidelityfx_loader_dx12.dll amd_fidelityfx_upscaler_dx12.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
+(robocopy "$(ProjectDir)\contrib\FidelityFX-SDK\Kits\FidelityFX\signedbin" $(TargetDir) amd_fidelityfx_loader_dx12.dll amd_fidelityfx_upscaler_dx12.dll amd_fidelityfx_framegeneration_dx12.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0
 (robocopy "$(ProjectDir)\contrib\NRD\_Bin\Release" $(TargetDir) NRD.dll) ^&amp; IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>

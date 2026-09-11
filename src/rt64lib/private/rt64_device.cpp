@@ -14,12 +14,18 @@
 
 #ifndef RT64_MINIMAL
 
+#include "rt64_framegen.h"
 #include "rt64_mesh.h"
 #include "rt64_mipmaps.h"
 #include "rt64_inspector.h"
 #include "rt64_scene.h"
 #include "rt64_shader.h"
 #include "rt64_texture.h"
+#include "rt64_view.h"
+
+#include "FidelityFX-SDK/Kits/FidelityFX/api/include/dx12/ffx_api_dx12.hpp"
+#include "FidelityFX-SDK/Kits/FidelityFX/framegeneration/include/ffx_framegeneration.hpp"
+#include "FidelityFX-SDK/Kits/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.hpp"
 
 #include "shaders/DirectRayGen.hlsl.h"
 #include "shaders/IndirectRayGen.hlsl.h"
@@ -40,6 +46,7 @@
 #include "shaders/DebugPS.hlsl.h"
 #include "shaders/Im3DPS.hlsl.h"
 #include "shaders/PostProcessPS.hlsl.h"
+#include "shaders/UICompositePS.hlsl.h"
 #include "shaders/UberSurfaceHit.hlsl.h"
 #include "shaders/UberShadowHit.hlsl.h"
 #include "shaders/UberRasterVS.hlsl.h"
@@ -114,6 +121,7 @@ RT64::Device::Device(HWND hwnd) {
 	d3dComposePipelineState = nullptr;
 	d3dPostProcessRootSignature = nullptr;
 	d3dPostProcessPipelineState = nullptr;
+	d3dUICompositePipelineState = nullptr;
 	d3dGaussianFilterRGB3x3RootSignature = nullptr;
 	d3dGaussianFilterRGB3x3PipelineState = nullptr;
 	d3dDebugRootSignature = nullptr;
@@ -124,6 +132,10 @@ RT64::Device::Device(HWND hwnd) {
 	im3dPipelineStateTriangle = nullptr;
 	d3dRtvHeap = nullptr;
 	d3dSwapChain = nullptr;
+	fgSwapChainContext = nullptr;
+	fgSwapChainActive = false;
+	fgLastPresentInterpolated = false;
+	presentedFrameCount = 0;
 	d3dCommandList = nullptr;
 	d3dCommandAllocator = nullptr;
 	d3dCommandQueue = nullptr;
@@ -201,6 +213,7 @@ RT64::Device::~Device() {
 	ReleaseCom(&d3dComposePipelineState);
 	ReleaseCom(&d3dPostProcessRootSignature);
 	ReleaseCom(&d3dPostProcessPipelineState);
+	ReleaseCom(&d3dUICompositePipelineState);
 	ReleaseCom(&d3dGaussianFilterRGB3x3RootSignature);
 	ReleaseCom(&d3dGaussianFilterRGB3x3PipelineState);
 	ReleaseCom(&d3dDebugRootSignature);
@@ -209,9 +222,17 @@ RT64::Device::~Device() {
 	ReleaseCom(&im3dPipelineStatePoint);
 	ReleaseCom(&im3dPipelineStateLine);
 	ReleaseCom(&im3dPipelineStateTriangle);
+	releaseDeferred(true);
 
 	// The swap chain's own buffers and the heap describing them.
 	releaseRTVs();
+
+	if (fgSwapChainActive) {
+		ffx::Context fgCtx = fgSwapChainContext;
+		ffx::DestroyContext(fgCtx);
+		fgSwapChainContext = nullptr;
+		fgSwapChainActive = false;
+	}
 
 	ReleaseCom(&d3dSwapChain);
 	ReleaseCom(&d3dCommandList);
@@ -374,6 +395,16 @@ void RT64::Device::createRaytracingDevice() {
 	if (d3dDevice == nullptr) {
 		throw std::runtime_error("Unable to detect a device capable of raytracing.\n" + ss.str());
 	}
+
+	ID3D12InfoQueue *infoQueue = nullptr;
+	if (SUCCEEDED(d3dDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+		D3D12_MESSAGE_ID deniedMessages[] = { D3D12_MESSAGE_ID_CREATERESOURCE_STATE_IGNORED };
+		D3D12_INFO_QUEUE_FILTER filter = {};
+		filter.DenyList.NumIDs = _countof(deniedMessages);
+		filter.DenyList.pIDList = deniedMessages;
+		infoQueue->PushStorageFilter(&filter);
+		infoQueue->Release();
+	}
 }
 
 #ifndef RT64_MINIMAL
@@ -439,6 +470,10 @@ void RT64::Device::createRTVs() {
 	for (UINT n = 0; n < FrameCount; n++) {
 		D3D12_CHECK(d3dSwapChain->GetBuffer(n, IID_PPV_ARGS(&d3dRenderTargets[n])));
 		d3dDevice->CreateRenderTargetView(d3dRenderTargets[n], nullptr, rtvHandle);
+
+		wchar_t bufferName[32];
+		swprintf(bufferName, 32, L"RT64 back buffer %u", n);
+		d3dRenderTargets[n]->SetName(bufferName);
 		rtvHandle.Offset(1, d3dRtvDescriptorSize);
 	}
 
@@ -494,6 +529,14 @@ CD3DX12_CPU_DESCRIPTOR_HANDLE RT64::Device::getD3D12RTV() const {
 	return CD3DX12_CPU_DESCRIPTOR_HANDLE(d3dRtvHeap->GetCPUDescriptorHandleForHeapStart(), d3dFrameIndex, d3dRtvDescriptorSize);
 }
 
+IDXGISwapChain3 *RT64::Device::getD3D12SwapChain() const {
+	return d3dSwapChain;
+}
+
+bool RT64::Device::isFrameGenSwapChainActive() const {
+	return fgSwapChainActive;
+}
+
 ID3D12RootSignature *RT64::Device::getComposeRootSignature() const {
 	return d3dComposeRootSignature;
 }
@@ -508,6 +551,10 @@ ID3D12RootSignature *RT64::Device::getPostProcessRootSignature() const {
 
 ID3D12PipelineState *RT64::Device::getPostProcessPipelineState() const {
 	return d3dPostProcessPipelineState;
+}
+
+ID3D12PipelineState *RT64::Device::getUICompositePipelineState() const {
+	return d3dUICompositePipelineState;
 }
 
 ID3D12RootSignature *RT64::Device::getGaussianFilterRGB3x3RootSignature() const {
@@ -622,8 +669,38 @@ RT64::AllocatedResource RT64::Device::allocateResource(D3D12_HEAP_TYPE HeapType,
 
 	D3D12MA::Allocation *allocation = nullptr;
 	ID3D12Resource *resource = nullptr;
-	d3dAllocator->CreateResource(&allocationDesc, pDesc, InitialResourceState, pOptimizedClearValue, &allocation, IID_PPV_ARGS(&resource));
+	D3D12_CHECK(d3dAllocator->CreateResource(&allocationDesc, pDesc, InitialResourceState, pOptimizedClearValue, &allocation, IID_PPV_ARGS(&resource)));
 	return AllocatedResource(allocation);
+}
+
+void RT64::Device::deferRelease(IUnknown *object) {
+	if (object != nullptr) {
+		deferredReleases.push_back({ presentedFrameCount + DeferredReleaseFrames, object, AllocatedResource() });
+	}
+}
+
+void RT64::Device::deferRelease(AllocatedResource &resource) {
+	if (!resource.IsNull()) {
+		deferredReleases.push_back({ presentedFrameCount + DeferredReleaseFrames, nullptr, resource });
+		resource = AllocatedResource();
+	}
+}
+
+void RT64::Device::releaseDeferred(bool all) {
+	auto it = deferredReleases.begin();
+	while (it != deferredReleases.end()) {
+		if (all || (it->releaseFrame <= presentedFrameCount)) {
+			if (it->object != nullptr) {
+				it->object->Release();
+			}
+
+			it->resource.Release();
+			it = deferredReleases.erase(it);
+		}
+		else {
+			it++;
+		}
+	}
 }
 
 RT64::AllocatedResource RT64::Device::allocateBuffer(D3D12_HEAP_TYPE HeapType, uint64_t size, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES InitialResourceState, bool committed, bool shared) {
@@ -971,6 +1048,26 @@ void RT64::Device::loadAssets() {
 		psoDesc.PS = CD3DX12_SHADER_BYTECODE(PostProcessPSBlob, sizeof(PostProcessPSBlob));
 		psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 		D3D12_CHECK(d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&d3dPostProcessPipelineState)));
+	}
+
+	RT64_LOG_PRINTF("Creating the UI composite pipeline state");
+	{
+		const D3D12_RENDER_TARGET_BLEND_DESC premulAlphaBlendDesc = {
+			TRUE, FALSE,
+			D3D12_BLEND_ONE, D3D12_BLEND_INV_SRC_ALPHA, D3D12_BLEND_OP_ADD,
+			D3D12_BLEND_ONE, D3D12_BLEND_INV_SRC_ALPHA, D3D12_BLEND_OP_ADD,
+			D3D12_LOGIC_OP_NOOP,
+			D3D12_COLOR_WRITE_ENABLE_ALL
+		};
+
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+		setPsoDefaults(psoDesc, premulAlphaBlendDesc, DXGI_FORMAT_R8G8B8A8_UNORM);
+		psoDesc.InputLayout = { nullptr, 0 };
+		psoDesc.pRootSignature = d3dPostProcessRootSignature;
+		psoDesc.VS = CD3DX12_SHADER_BYTECODE(FullScreenVSBlob, sizeof(FullScreenVSBlob));
+		psoDesc.PS = CD3DX12_SHADER_BYTECODE(UICompositePSBlob, sizeof(UICompositePSBlob));
+		psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		D3D12_CHECK(d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&d3dUICompositePipelineState)));
 	}
 
 	RT64_LOG_PRINTF("Creating the debug root signature");
@@ -1472,10 +1569,8 @@ ID3D12PipelineState *RT64::Device::getCustomRasterPipeline(uint64_t hash) const 
 }
 
 void RT64::Device::setCustomPostProcessShader(const std::string &fragmentHLSL, const std::vector<RT64_SHADER_INPUT> &fragmentInputs, const std::string &fragmentOutputName, int targetWidth, int targetHeight) {
-	if (d3dCustomPostProcessPipelineState != nullptr) {
-		d3dCustomPostProcessPipelineState->Release();
-		d3dCustomPostProcessPipelineState = nullptr;
-	}
+	deferRelease(d3dCustomPostProcessPipelineState);
+	d3dCustomPostProcessPipelineState = nullptr;
 
 	customPostProcessWidth = targetWidth;
 	customPostProcessHeight = targetHeight;
@@ -1714,14 +1809,65 @@ void RT64::Device::preRender() {
 	RT64_LOG_PRINTF("Finished device prerender");
 }
 
-void RT64::Device::postRender(int vsyncInterval) {
+void RT64::Device::postRender(int vsyncInterval, View *activeView, bool frameGenEnabled) {
 	RT64_LOG_PRINTF("Started device postrender");
 
 	// Indicate that the back buffer will now be used to present.
+	FrameGen *frameGen = (activeView != nullptr) ? activeView->getFrameGen() : nullptr;
+	ID3D12Resource *frameGenUIColor = (activeView != nullptr) ? activeView->finishFrameGenUI() : nullptr;
+	const bool frameGenActive = fgSwapChainActive && frameGenEnabled;
+
 	CD3DX12_RESOURCE_BARRIER transitionBarrier = CD3DX12_RESOURCE_BARRIER::Transition(d3dRenderTargets[d3dFrameIndex], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 	d3dCommandList->ResourceBarrier(1, &transitionBarrier);
 
 	submitCommandList();
+
+	if (fgSwapChainActive) {
+		ffx::Context fgSwapChainCtx = fgSwapChainContext;
+		ffx::ConfigureDescFrameGenerationSwapChainRegisterUiResourceDX12 uiDesc{};
+		if (frameGenUIColor != nullptr) {
+			uiDesc.uiResource = ffxApiGetResourceDX12(frameGenUIColor, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+			uiDesc.flags = FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_ENABLE_INTERNAL_UI_DOUBLE_BUFFERING |
+				FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_USE_PREMUL_ALPHA;
+		}
+		ffx::Configure(fgSwapChainCtx, uiDesc);
+	}
+
+	if (fgSwapChainActive && (frameGen != nullptr)) {
+		frameGen->configure(d3dSwapChain, frameGenActive, activeView->getFrameGenFrameID());
+	}
+
+	bool interpolatingThisFrame = false;
+	if (frameGenActive && activeView->getFrameGenFramePrepared()) {
+		ffx::Context fgSwapChainCtx = fgSwapChainContext;
+		ffx::QueryDescFrameGenerationSwapChainInterpolationCommandListDX12 cmdListQuery{};
+		void *interpCommandListRaw = nullptr;
+		cmdListQuery.pOutCommandList = &interpCommandListRaw;
+
+		ffx::QueryDescFrameGenerationSwapChainInterpolationTextureDX12 textureQuery{};
+		FfxApiResource interpTextureResource{};
+		textureQuery.pOutTexture = &interpTextureResource;
+
+		ffx::ReturnCode cmdListRetCode = ffx::Query(fgSwapChainCtx, cmdListQuery);
+		ffx::ReturnCode textureRetCode = ffx::Query(fgSwapChainCtx, textureQuery);
+		if ((cmdListRetCode == ffx::ReturnCode::Ok) && (textureRetCode == ffx::ReturnCode::Ok) && (interpCommandListRaw != nullptr)) {
+			ID3D12GraphicsCommandList *interpCommandList = static_cast<ID3D12GraphicsCommandList *>(interpCommandListRaw);
+			ID3D12Resource *interpOutput = static_cast<ID3D12Resource *>(interpTextureResource.resource);
+			frameGen->dispatchGeneration(interpCommandList, d3dRenderTargets[d3dFrameIndex], interpOutput, width, height, activeView->getFrameGenFrameID(), activeView->getFrameGenFrameReset());
+			interpolatingThisFrame = true;
+		}
+		else {
+			RT64_LOG_PRINTF("ffx::Query (FrameGenerationInterpolation) failed: %d, %d\n", (uint32_t)(cmdListRetCode), (uint32_t)(textureRetCode));
+		}
+	}
+
+	if (fgSwapChainActive && fgLastPresentInterpolated && !interpolatingThisFrame) {
+		ffx::Context fgSwapChainCtx = fgSwapChainContext;
+		ffx::DispatchDescFrameGenerationSwapChainWaitForPresentsDX12 waitDesc{};
+		ffx::Dispatch(fgSwapChainCtx, waitDesc);
+	}
+
+	fgLastPresentInterpolated = interpolatingThisFrame;
 
 	// Present the frame.
 	const UINT presentFlags = ((vsyncInterval == 0) && allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
@@ -1729,10 +1875,77 @@ void RT64::Device::postRender(int vsyncInterval) {
 	waitForGPU();
 	d3dFrameIndex = d3dSwapChain->GetCurrentBackBufferIndex();
 
+	presentedFrameCount++;
+	releaseDeferred(false);
+
 	// Leave command list open.
 	resetCommandList();
 
 	RT64_LOG_PRINTF("Finished device postrender");
+}
+
+bool RT64::Device::enableFrameGenSwapChain() {
+	if (fgSwapChainActive) {
+		return true;
+	}
+
+	if (d3dSwapChain == nullptr) {
+		return false;
+	}
+
+	const unsigned int MinFramesBeforeFrameGen = 15;
+	if (presentedFrameCount < MinFramesBeforeFrameGen) {
+		return false;
+	}
+
+	waitForGPU();
+
+	DXGI_SWAP_CHAIN_DESC1 desc1 = {};
+	D3D12_CHECK(d3dSwapChain->GetDesc1(&desc1));
+
+	DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreenDesc = {};
+	D3D12_CHECK(d3dSwapChain->GetFullscreenDesc(&fullscreenDesc));
+
+	releaseRTVs();
+	ReleaseCom(&d3dSwapChain);
+
+	ffx::CreateContextDescFrameGenerationSwapChainVersionDX12 versionDesc{};
+	versionDesc.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
+
+	IDXGISwapChain4 *newSwapChain = nullptr;
+	ffx::CreateContextDescFrameGenerationSwapChainForHwndDX12 createDesc{};
+	createDesc.swapchain = &newSwapChain;
+	createDesc.hwnd = hwnd;
+	createDesc.desc = &desc1;
+	createDesc.fullscreenDesc = &fullscreenDesc;
+	createDesc.dxgiFactory = dxgiFactory;
+	createDesc.gameQueue = d3dCommandQueue;
+
+	ffx::Context fgCtx = nullptr;
+	ffx::ReturnCode retCode = ffx::CreateContext(fgCtx, nullptr, createDesc, versionDesc);
+	if (retCode != ffx::ReturnCode::Ok) {
+		RT64_LOG_PRINTF("ffx::CreateContext (FrameGenerationSwapChainForHwnd) failed: %d\n", (uint32_t)(retCode));
+
+		IDXGISwapChain1 *plainSwapChain = nullptr;
+		D3D12_CHECK(dxgiFactory->CreateSwapChainForHwnd(d3dCommandQueue, hwnd, &desc1, &fullscreenDesc, nullptr, &plainSwapChain));
+		D3D12_CHECK(plainSwapChain->QueryInterface(IID_PPV_ARGS(&d3dSwapChain)));
+		ReleaseCom(&plainSwapChain);
+		createRTVs();
+		d3dFrameIndex = d3dSwapChain->GetCurrentBackBufferIndex();
+
+		return false;
+	}
+
+	d3dSwapChain = newSwapChain;
+	fgSwapChainContext = fgCtx;
+	fgSwapChainActive = true;
+
+	D3D12_CHECK(dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER));
+
+	createRTVs();
+	d3dFrameIndex = d3dSwapChain->GetCurrentBackBufferIndex();
+
+	return true;
 }
 
 void RT64::Device::draw(int vsyncInterval, float deltaTimeMs) {
@@ -1770,6 +1983,20 @@ void RT64::Device::draw(int vsyncInterval, float deltaTimeMs) {
 		scene->update();
 	}
 
+	// Determine the active view (use the first available view for now).
+	View *activeView = nullptr;
+	for (Scene *scene : scenes) {
+		auto views = scene->getViews();
+		if (!views.empty()) {
+			activeView = views[0];
+		}
+	}
+
+	const bool frameGenEnabled = (activeView != nullptr) && activeView->getFrameGen()->isInitialized() &&
+		activeView->getFrameGenEnabled() && enableFrameGenSwapChain();
+
+	d3dFrameIndex = d3dSwapChain->GetCurrentBackBufferIndex();
+
 	// Render each scene.
 	preRender();
 
@@ -1780,22 +2007,20 @@ void RT64::Device::draw(int vsyncInterval, float deltaTimeMs) {
 	RT64_LOG_PRINTF("Reset render target");
 
 	// Scene has most likely changed the render target. Set it again for the inspectors to work properly.
-	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle = getD3D12RTV();
-	d3dCommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+	CD3DX12_CPU_DESCRIPTOR_HANDLE frameGenUIHandle;
+	const bool useFrameGenUITarget = (activeView != nullptr) && activeView->getFrameGenUIRenderTargetView(frameGenUIHandle);
+	if (useFrameGenUITarget) {
+		d3dCommandList->OMSetRenderTargets(1, &frameGenUIHandle, FALSE, nullptr);
+	}
+	else {
+		CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle = getD3D12RTV();
+		d3dCommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+	}
 
 	// Find mouse cursor position.
 	POINT cursorPos = {};
 	GetCursorPos(&cursorPos);
 	ScreenToClient(hwnd, &cursorPos);
-
-	// Determine the active view (use the first available view for now).
-	View *activeView = nullptr;
-	for (Scene *scene : scenes) {
-		auto views = scene->getViews();
-		if (!views.empty()) {
-			activeView = views[0];
-		}
-	}
 
 	// Render the inspectors on the active view.
 	if (activeView != nullptr) {
@@ -1804,7 +2029,7 @@ void RT64::Device::draw(int vsyncInterval, float deltaTimeMs) {
 		}
 	}
 
-	postRender(vsyncInterval);
+	postRender(vsyncInterval, activeView, frameGenEnabled);
 
 	RT64_LOG_PRINTF("Finished device draw");
 }

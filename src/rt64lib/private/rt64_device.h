@@ -23,6 +23,8 @@ namespace RT64 {
 	class Texture;
 	class Mipmaps;
 	class Mesh;
+	class FrameGen;
+	class View;
 
 	class Device {
 	public:
@@ -64,12 +66,20 @@ namespace RT64 {
 		ID3D12Resource *d3dRenderTargets[FrameCount];
 		AllocatedResource d3dRenderTargetReadback;
 		UINT d3dRenderTargetReadbackRowWidth;
+
+		void *fgSwapChainContext;
+		bool fgSwapChainActive;
+		bool fgLastPresentInterpolated;
+
+		unsigned int presentedFrameCount;
+
 		ID3D12CommandAllocator *d3dCommandAllocator;
 		ID3D12DescriptorHeap *d3dRtvHeap;
 		ID3D12RootSignature *d3dComposeRootSignature;
 		ID3D12PipelineState *d3dComposePipelineState;
 		ID3D12RootSignature *d3dPostProcessRootSignature;
 		ID3D12PipelineState *d3dPostProcessPipelineState;
+		ID3D12PipelineState *d3dUICompositePipelineState;
 		ID3D12RootSignature *d3dGaussianFilterRGB3x3RootSignature;
 		ID3D12PipelineState *d3dGaussianFilterRGB3x3PipelineState;
 		ID3D12RootSignature *d3dDebugRootSignature;
@@ -130,6 +140,16 @@ namespace RT64 {
 		int customPostProcessHeight;
 
 		std::vector<PostProcessUniformBlock> customPostProcessUniforms;
+
+		struct DeferredRelease {
+			unsigned int releaseFrame;
+			IUnknown *object;
+			AllocatedResource resource;
+		};
+		static const unsigned int DeferredReleaseFrames = 8;
+		std::vector<DeferredRelease> deferredReleases;
+		void releaseDeferred(bool all);
+
 		D3D12_RESOURCE_BARRIER lastCommandQueueBarrier;
 		bool lastCommandQueueBarrierActive;
 		D3D12_RESOURCE_BARRIER lastCopyQueueBarrier;
@@ -155,13 +175,15 @@ namespace RT64 {
 		ID3D12RootSignature *createUberRasterSignature();
 		void createUberRasterPipeline();
 		void preRender();
-		void postRender(int vsyncInterval);
+		void postRender(int vsyncInterval, View *activeView, bool frameGenEnabled);
 #endif
 	public:
 		Device(HWND hwnd);
 		virtual ~Device();
 #ifndef RT64_MINIMAL
 		void draw(int vsyncInterval, float deltaTimeMs);
+		bool enableFrameGenSwapChain();
+		bool isFrameGenSwapChainActive() const;
 		void addScene(Scene *scene);
 		void removeScene(Scene *scene);
 		void addInspector(Inspector* inspector);
@@ -175,10 +197,12 @@ namespace RT64 {
 		ID3D12RootSignature *getD3D12RtGlobalRootSignature() const;
 		ID3D12Resource *getD3D12RenderTarget() const;
 		CD3DX12_CPU_DESCRIPTOR_HANDLE getD3D12RTV() const;
+		IDXGISwapChain3 *getD3D12SwapChain() const;
 		ID3D12RootSignature *getComposeRootSignature() const;
 		ID3D12PipelineState *getComposePipelineState() const;
 		ID3D12RootSignature *getPostProcessRootSignature() const;
 		ID3D12PipelineState *getPostProcessPipelineState() const;
+		ID3D12PipelineState *getUICompositePipelineState() const;
 		ID3D12RootSignature *getGaussianFilterRGB3x3RootSignature() const;
 		ID3D12PipelineState *getGaussianFilterRGB3x3PipelineState() const;
 		ID3D12RootSignature *getDebugRootSignature() const;
@@ -224,6 +248,8 @@ namespace RT64 {
 		void addPendingBarrier(const D3D12_RESOURCE_BARRIER &barrier);
 		void flushPendingBarriers();
 		void removePendingBarriersForResource(ID3D12Resource *resource);
+		void deferRelease(IUnknown *object);
+		void deferRelease(AllocatedResource &resource);
 		void setLastCommandQueueBarrier(const D3D12_RESOURCE_BARRIER &barrier);
 		void setLastCommandQueueUAVBarrier(ID3D12Resource *resource);
 		void submitCommandQueueBarrier();
