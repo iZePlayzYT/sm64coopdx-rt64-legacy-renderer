@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 
 #include <dwmapi.h>
 
@@ -240,13 +241,49 @@ void RT64::Device::createDXGIFactory() {
 	UINT dxgiFactoryFlags = 0;
 	dxgiFactory = nullptr;
 
-#ifndef NDEBUG
-	ID3D12Debug *debugController;
-	if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
-		debugController->EnableDebugLayer();
+	// Probe the high-performance GPU before enabling the D3D12 debug layer.
+	// On AMD, debug-layer startup crashes in amdxc64!GetSettingsBlobsAll
+	// (gdb + page heap on Adrenalin 26.8.1, EmeraldLockdown).
+	bool amdAdapter = false;
+	IDXGIFactory2 *probeFactory = nullptr;
+	if (SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&probeFactory))) && probeFactory != nullptr) {
+		IDXGIFactory6 *factory6 = nullptr;
+		if (SUCCEEDED(probeFactory->QueryInterface(IID_PPV_ARGS(&factory6)))) {
+			IDXGIAdapter1 *adapter = nullptr;
+			if (SUCCEEDED(factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)))) {
+				DXGI_ADAPTER_DESC1 desc = {};
+				if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+					amdAdapter = (desc.VendorId == 0x1002);
+				}
+				adapter->Release();
+			}
+			factory6->Release();
+		}
+		probeFactory->Release();
+	}
 
-		// Enable additional debug layers.
-		dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+#ifndef NDEBUG
+	bool enableDebugLayer = !amdAdapter;
+	const char *forceDebug = getenv("RT64_D3D12_DEBUG");
+	if (forceDebug != nullptr && forceDebug[0] == '1') {
+		enableDebugLayer = true;
+	}
+	else if (forceDebug != nullptr && forceDebug[0] == '0') {
+		enableDebugLayer = false;
+	}
+
+	if (enableDebugLayer) {
+		ID3D12Debug *debugController = nullptr;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
+			debugController->EnableDebugLayer();
+			debugController->Release();
+
+			// Enable additional debug layers.
+			dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+		}
+	}
+	else if (amdAdapter) {
+		RT64_LOG_PRINTF("Skipping the D3D12 debug layer on AMD");
 	}
 #endif
 
@@ -1146,7 +1183,10 @@ void RT64::Device::createRaytracingPipeline() {
 	RT64_LOG_PRINTF("Adding root signature associations");
 
 	// Associate the root signatures to the hit groups.
-	pipeline.AddRootSignatureAssociation(d3dRayGenSignature, { L"PrimaryRayGen", L"DirectRayGen", L"IndirectRayGen", L"ReflectionRayGen", L"RefractionRayGen", L"VolumetricRayGen" });
+	// SurfaceMiss/ShadowMiss live in the same DXIL library as PrimaryRayGen, so they
+	// must share that local root signature. A different (empty) RS for miss shaders
+	// is what crashed amdxc64 in CreateStateObject.
+	pipeline.AddRootSignatureAssociation(d3dRayGenSignature, { L"PrimaryRayGen", L"DirectRayGen", L"IndirectRayGen", L"ReflectionRayGen", L"RefractionRayGen", L"VolumetricRayGen", L"SurfaceMiss", L"ShadowMiss" });
 	pipeline.AddRootSignatureAssociation(d3dUberHitSignature, { L"UberSurfaceHitGroup" });
 	pipeline.AddRootSignatureAssociation(d3dUberShadowHitSignature, { L"UberShadowHitGroup" });
 
@@ -1167,7 +1207,9 @@ void RT64::Device::createRaytracingPipeline() {
 	}
 
 	// Pipeline configuration. Path tracing only needs one recursion level at most.
-	pipeline.SetMaxPayloadSize(8 * sizeof(float));
+	// HitInfo is uint + float + two float3s (32 bytes tightly packed). Allow 64 bytes
+	// so HLSL float3 padding cannot undershoot MaxPayloadSizeInBytes on AMD.
+	pipeline.SetMaxPayloadSize(64);
 	pipeline.SetMaxAttributeSize(2 * sizeof(float));
 	pipeline.SetMaxRecursionDepth(1);
 

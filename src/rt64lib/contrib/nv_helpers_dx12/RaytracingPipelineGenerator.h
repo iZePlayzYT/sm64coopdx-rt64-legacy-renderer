@@ -174,8 +174,9 @@ private:
     D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION m_association = {};
   };
 
-  /// The pipeline creation requires having at least one empty global and local root signatures, so
-  /// we systematically create both
+  /// The pipeline needs a global root signature. An empty one is created only when the caller
+  /// did not share one. A dummy local RS is not emitted; shaders without an association use an
+  /// implicit empty local RS.
   void CreateDummyRootSignatures();
 
   /// Build a list containing the export symbols for the ray generation shaders, miss shaders, and

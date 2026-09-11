@@ -1379,9 +1379,10 @@ void RT64::View::createShaderBindingTable() {
 	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getRefractionRayGenID(), { srvUavPointer });
 	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getVolumetricRayGenID(), { srvUavPointer });
 
-	// Miss shaders don't use any external data.
-	sbtHelper.AddMissProgram(scene->getDevice()->getSurfaceMissID(), {});
-	sbtHelper.AddMissProgram(scene->getDevice()->getShadowMissID(), {});
+	// Miss shaders share the raygen local root signature (same DXIL library as PrimaryRayGen),
+	// so the SBT record must include the same descriptor-table handle.
+	sbtHelper.AddMissProgram(scene->getDevice()->getSurfaceMissID(), { srvUavPointer });
+	sbtHelper.AddMissProgram(scene->getDevice()->getShadowMissID(), { srvUavPointer });
 
 	std::vector<void *> hitGroupArgs;
 	hitGroupArgs.reserve(4 + RT64_MAX_SHADER_UNIFORM_BLOCKS);
@@ -2043,6 +2044,7 @@ void RT64::View::render(float deltaTimeMs) {
 			d3dCommandList->SetComputeRootSignature(rtGlobalRootSignature);
 			d3dCommandList->DispatchRays(&desc);
 		};
+		d3dCommandList->SetComputeRootSignature(rtGlobalRootSignature);
 		d3dCommandList->SetPipelineState1(scene->getDevice()->getD3D12RtStateObject());
 		d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data());
 		dispatchRays();
