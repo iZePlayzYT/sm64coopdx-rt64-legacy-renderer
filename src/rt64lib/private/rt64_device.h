@@ -92,7 +92,6 @@ namespace RT64 {
 		void *surfaceMissID;
 		void *shadowMissID;
 		Texture *blueNoise;
-		ID3D12RootSignature *d3dRayGenSignature;
 		ID3D12PipelineState *im3dPipelineStatePoint;
 		ID3D12PipelineState *im3dPipelineStateLine;
 		ID3D12PipelineState *im3dPipelineStateTriangle;
@@ -149,7 +148,6 @@ namespace RT64 {
 		void fallBackFromCustomShaders();
 		void createDxcCompiler();
 		ID3D12RootSignature *createEmptyGlobalRootSignature();
-		ID3D12RootSignature *createRayGenSignature();
 		ID3D12RootSignature *createUberHitSignature(bool hitBuffers);
 		ID3D12RootSignature *createCustomHitSignature(bool hitBuffers);
 		ID3D12RootSignature *d3dCustomHitSignature;

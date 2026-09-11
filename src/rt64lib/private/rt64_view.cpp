@@ -1315,15 +1315,6 @@ void RT64::View::createShaderResourceHeap() {
 }
 
 void RT64::View::createShaderBindingTable() {
-	// The pointer to the beginning of the heap is the only parameter required by shaders without root parameters
-	D3D12_GPU_DESCRIPTOR_HANDLE srvUavHeapHandle = descriptorHeap->GetGPUDescriptorHandleForHeapStart();
-	D3D12_GPU_DESCRIPTOR_HANDLE samplerHeapHandle = samplerHeap->GetGPUDescriptorHandleForHeapStart();
-	
-	// The helper treats both root parameter pointers and heap pointers as void*, while DX12 uses the D3D12_GPU_DESCRIPTOR_HANDLE 
-	// to define heap pointers. The pointer in this struct is a UINT64, which then has to be reinterpreted as a pointer.
-	auto srvUavPointer = reinterpret_cast<UINT64 *>(srvUavHeapHandle.ptr);
-	auto samplerPointer = reinterpret_cast<UINT64 *>(samplerHeapHandle.ptr);
-
 	// Add the vertex buffers from all the meshes used by the instances to the hit group.
 	void *uberSurfaceHitGroupID = scene->getDevice()->getSurfaceHitGroupID();
 	void *uberShadowHitGroupID = scene->getDevice()->getShadowHitGroupID();
@@ -1371,18 +1362,15 @@ void RT64::View::createShaderBindingTable() {
 	// The SBT helper class collects calls to Add*Program. If called several times, the helper must be emptied before re-adding shaders.
 	sbtHelper.Reset();
 
-	// The ray generation only uses heap data.
-	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getPrimaryRayGenID(), { srvUavPointer });
-	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getDirectRayGenID(), { srvUavPointer });
-	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getIndirectRayGenID(), { srvUavPointer });
-	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getReflectionRayGenID(), { srvUavPointer });
-	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getRefractionRayGenID(), { srvUavPointer });
-	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getVolumetricRayGenID(), { srvUavPointer });
-
-	// Miss shaders share the raygen local root signature (same DXIL library as PrimaryRayGen),
-	// so the SBT record must include the same descriptor-table handle.
-	sbtHelper.AddMissProgram(scene->getDevice()->getSurfaceMissID(), { srvUavPointer });
-	sbtHelper.AddMissProgram(scene->getDevice()->getShadowMissID(), { srvUavPointer });
+	// The ray generation and miss shaders use only the global root signature.
+	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getPrimaryRayGenID(), {});
+	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getDirectRayGenID(), {});
+	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getIndirectRayGenID(), {});
+	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getReflectionRayGenID(), {});
+	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getRefractionRayGenID(), {});
+	sbtHelper.AddRayGenerationProgram(scene->getDevice()->getVolumetricRayGenID(), {});
+	sbtHelper.AddMissProgram(scene->getDevice()->getSurfaceMissID(), {});
+	sbtHelper.AddMissProgram(scene->getDevice()->getShadowMissID(), {});
 
 	std::vector<void *> hitGroupArgs;
 	hitGroupArgs.reserve(4 + RT64_MAX_SHADER_UNIFORM_BLOCKS);
@@ -1395,8 +1383,6 @@ void RT64::View::createShaderBindingTable() {
 		hitGroupArgs.clear();
 		hitGroupArgs.push_back((void *)(rtInstance.vertexBufferView->BufferLocation));
 		hitGroupArgs.push_back((void *)(rtInstance.indexBufferView->BufferLocation));
-		hitGroupArgs.push_back(srvUavPointer);
-		hitGroupArgs.push_back(samplerPointer);
 
 		if (usesCustomHitGroups) {
 			for (uint32_t reg = 1; reg < RT64_MAX_SHADER_UNIFORM_BLOCKS; reg++) {
@@ -2040,11 +2026,14 @@ void RT64::View::render(float deltaTimeMs) {
 		// NVIDIA drivers do, which is why this used to look NVIDIA-only.
 		RT64_LOG_PRINTF("Dispatching primary rays");
 		ID3D12RootSignature *rtGlobalRootSignature = scene->getDevice()->getD3D12RtGlobalRootSignature();
+		D3D12_GPU_DESCRIPTOR_HANDLE rtSrvUavTable = descriptorHeap->GetGPUDescriptorHandleForHeapStart();
+		D3D12_GPU_DESCRIPTOR_HANDLE rtSamplerTable = samplerHeap->GetGPUDescriptorHandleForHeapStart();
 		auto dispatchRays = [&]() {
 			d3dCommandList->SetComputeRootSignature(rtGlobalRootSignature);
+			d3dCommandList->SetComputeRootDescriptorTable(0, rtSrvUavTable);
+			d3dCommandList->SetComputeRootDescriptorTable(1, rtSamplerTable);
 			d3dCommandList->DispatchRays(&desc);
 		};
-		d3dCommandList->SetComputeRootSignature(rtGlobalRootSignature);
 		d3dCommandList->SetPipelineState1(scene->getDevice()->getD3D12RtStateObject());
 		d3dCommandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data());
 		dispatchRays();

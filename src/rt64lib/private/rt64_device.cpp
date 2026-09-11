@@ -108,7 +108,6 @@ RT64::Device::Device(HWND hwnd) {
 	mipmaps = nullptr;
 	disableMipmaps = false;
 	d3dRtStateObjectProps = nullptr;
-	d3dRayGenSignature = nullptr;
 	d3dDxcCompiler = nullptr;
 	d3dDxcLibrary = nullptr;
 	d3dComposeRootSignature = nullptr;
@@ -180,7 +179,6 @@ RT64::Device::~Device() {
 	ReleaseCom(&d3dRtStateObjectProps);
 	ReleaseCom(&d3dRtStateObject);
 	ReleaseCom(&d3dRtGlobalRootSignature);
-	ReleaseCom(&d3dRayGenSignature);
 	ReleaseCom(&d3dUberSurfaceHitLibrary);
 	ReleaseCom(&d3dUberShadowHitLibrary);
 	ReleaseCom(&d3dUberHitSignature);
@@ -1151,9 +1149,7 @@ void RT64::Device::createRaytracingPipeline() {
 
 	RT64_LOG_PRINTF("Creating root signatures");
 
-	if (d3dRayGenSignature == nullptr) { d3dRayGenSignature = createRayGenSignature(); }
 	if (d3dUberHitSignature == nullptr) { d3dUberHitSignature = createUberHitSignature(true); }
-	if (d3dUberShadowHitSignature == nullptr) { d3dUberShadowHitSignature = createUberHitSignature(false); }
 	if (d3dCustomHitSignature == nullptr) { d3dCustomHitSignature = createCustomHitSignature(true); }
 	if (d3dCustomShadowHitSignature == nullptr) { d3dCustomShadowHitSignature = createCustomHitSignature(false); }
 
@@ -1182,13 +1178,10 @@ void RT64::Device::createRaytracingPipeline() {
 
 	RT64_LOG_PRINTF("Adding root signature associations");
 
-	// Associate the root signatures to the hit groups.
-	// SurfaceMiss/ShadowMiss live in the same DXIL library as PrimaryRayGen, so they
-	// must share that local root signature. A different (empty) RS for miss shaders
-	// is what crashed amdxc64 in CreateStateObject.
-	pipeline.AddRootSignatureAssociation(d3dRayGenSignature, { L"PrimaryRayGen", L"DirectRayGen", L"IndirectRayGen", L"ReflectionRayGen", L"RefractionRayGen", L"VolumetricRayGen", L"SurfaceMiss", L"ShadowMiss" });
-	pipeline.AddRootSignatureAssociation(d3dUberHitSignature, { L"UberSurfaceHitGroup" });
-	pipeline.AddRootSignatureAssociation(d3dUberShadowHitSignature, { L"UberShadowHitGroup" });
+	// Raygen/miss use only the global RS (no local RS). Hit groups keep a tiny local RS
+	// with per-record vertex/index SRVs. Putting the 512-texture heap on a local RS is
+	// what still AVs amdxc64 in CreateStateObject (hr=0xC0000005).
+	pipeline.AddRootSignatureAssociation(d3dUberHitSignature, { L"UberSurfaceHitGroup", L"UberShadowHitGroup" });
 
 	addedCustomShaders.clear();
 	for (Shader *customShader : customShaders) {
@@ -1279,31 +1272,9 @@ void RT64::Device::createDxcCompiler() {
 }
 
 ID3D12RootSignature *RT64::Device::createEmptyGlobalRootSignature() {
-	D3D12_ROOT_SIGNATURE_DESC rootDesc = {};
-	rootDesc.NumParameters = 0;
-	rootDesc.pParameters = nullptr;
-	rootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
-
-	ID3DBlob *serializedRootSignature = nullptr;
-	ID3DBlob *error = nullptr;
-	D3D12_CHECK(D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serializedRootSignature, &error));
-
-	ID3D12RootSignature *rootSignature = nullptr;
-	HRESULT createResult = d3dDevice->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(), serializedRootSignature->GetBufferSize(), IID_PPV_ARGS(&rootSignature));
-	if (serializedRootSignature != nullptr) {
-		serializedRootSignature->Release();
-	}
-	if (error != nullptr) {
-		error->Release();
-	}
-	D3D12_CHECK(createResult);
-	return rootSignature;
-}
-
-ID3D12RootSignature *RT64::Device::createRayGenSignature() {
+	// Shared RT bindings live on the global RS. AMD's DXIL compiler (amdxc64) AVs in
+	// CreateStateObject when this table is a local RS (hr=0xC0000005 on the latest DLL).
 	nv_helpers_dx12::RootSignatureGenerator rsc;
-
-	// Fill out the heap parameters.
 	rsc.AddHeapRangesParameter({
 		RT64_UAV_DESCRIPTORS(RT64_UAV_RANGE_ENTRY)
 		{ SRV_INDEX(gBackground), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, HEAP_INDEX(gBackground) },
@@ -1316,8 +1287,11 @@ ID3D12RootSignature *RT64::Device::createRayGenSignature() {
 		{ CBV_INDEX(gParams), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, HEAP_INDEX(gParams) }
 	});
 
-	// Fill out the samplers.
-	D3D12_STATIC_SAMPLER_DESC desc;
+	nv_helpers_dx12::RootSignatureGenerator::HeapRanges samplerHeapRange;
+	samplerHeapRange.push_back({ 1, RT64_SAMPLER_HEAP_COUNT, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 0 });
+	rsc.AddHeapRangesParameter(samplerHeapRange);
+
+	D3D12_STATIC_SAMPLER_DESC desc = {};
 	desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 	desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 	desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -1332,37 +1306,14 @@ ID3D12RootSignature *RT64::Device::createRayGenSignature() {
 	desc.ShaderRegister = 0;
 	desc.RegisterSpace = 0;
 
-	return rsc.Generate(d3dDevice, true, false, &desc, 1);
+	return rsc.Generate(d3dDevice, false, false, &desc, 1);
 }
 
 ID3D12RootSignature *RT64::Device::createCustomHitSignature(bool hitBuffers) {
+	(void)hitBuffers;
 	nv_helpers_dx12::RootSignatureGenerator rsc;
 	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV, SRV_INDEX(vertexBuffer));
 	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV, SRV_INDEX(indexBuffer));
-
-	{
-		nv_helpers_dx12::RootSignatureGenerator::HeapRanges heapRanges;
-
-		if (hitBuffers) {
-			heapRanges.push_back({ UAV_INDEX(gHitDistAndFlow), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitDistAndFlow) });
-			heapRanges.push_back({ UAV_INDEX(gHitColor), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitColor) });
-			heapRanges.push_back({ UAV_INDEX(gHitNormal), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitNormal) });
-			heapRanges.push_back({ UAV_INDEX(gHitSpecular), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitSpecular) });
-			heapRanges.push_back({ UAV_INDEX(gHitInstanceId), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitInstanceId) });
-		}
-
-		heapRanges.push_back({ SRV_INDEX(instanceTransforms), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, HEAP_INDEX(instanceTransforms) });
-		heapRanges.push_back({ SRV_INDEX(instanceMaterials), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, HEAP_INDEX(instanceMaterials) });
-		heapRanges.push_back({ SRV_INDEX(gTextures), SRV_TEXTURES_MAX, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, HEAP_INDEX(gTextures) });
-		heapRanges.push_back({ CBV_INDEX(gParams), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, HEAP_INDEX(gParams) });
-		rsc.AddHeapRangesParameter(heapRanges);
-	}
-
-	{
-		nv_helpers_dx12::RootSignatureGenerator::HeapRanges samplerHeapRange;
-		samplerHeapRange.push_back({ 1, RT64_SAMPLER_HEAP_COUNT, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 0 });
-		rsc.AddHeapRangesParameter(samplerHeapRange);
-	}
 
 	for (unsigned int i = 1; i < RT64_MAX_SHADER_UNIFORM_BLOCKS; i++) {
 		rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_CBV, i);
@@ -1372,34 +1323,10 @@ ID3D12RootSignature *RT64::Device::createCustomHitSignature(bool hitBuffers) {
 }
 
 ID3D12RootSignature *RT64::Device::createUberHitSignature(bool hitBuffers) {
+	(void)hitBuffers;
 	nv_helpers_dx12::RootSignatureGenerator rsc;
 	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV, SRV_INDEX(vertexBuffer));
 	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV, SRV_INDEX(indexBuffer));
-
-	{
-		nv_helpers_dx12::RootSignatureGenerator::HeapRanges heapRanges;
-
-		if (hitBuffers) {
-			heapRanges.push_back({ UAV_INDEX(gHitDistAndFlow), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitDistAndFlow) });
-			heapRanges.push_back({ UAV_INDEX(gHitColor), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitColor) });
-			heapRanges.push_back({ UAV_INDEX(gHitNormal), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitNormal) });
-			heapRanges.push_back({ UAV_INDEX(gHitSpecular), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitSpecular) });
-			heapRanges.push_back({ UAV_INDEX(gHitInstanceId), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, HEAP_INDEX(gHitInstanceId) });
-		}
-
-		heapRanges.push_back({ SRV_INDEX(instanceTransforms), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, HEAP_INDEX(instanceTransforms) });
-		heapRanges.push_back({ SRV_INDEX(instanceMaterials), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, HEAP_INDEX(instanceMaterials) });
-		heapRanges.push_back({ SRV_INDEX(gTextures), SRV_TEXTURES_MAX, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, HEAP_INDEX(gTextures) });
-		heapRanges.push_back({ CBV_INDEX(gParams), 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, HEAP_INDEX(gParams) });
-		rsc.AddHeapRangesParameter(heapRanges);
-	}
-
-	{
-		nv_helpers_dx12::RootSignatureGenerator::HeapRanges samplerHeapRange;
-		samplerHeapRange.push_back({ 1, RT64_SAMPLER_HEAP_COUNT, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 0 });
-		rsc.AddHeapRangesParameter(samplerHeapRange);
-	}
-
 	return rsc.Generate(d3dDevice, true, false, nullptr, 0);
 }
 
